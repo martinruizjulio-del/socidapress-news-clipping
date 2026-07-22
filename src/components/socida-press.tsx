@@ -514,23 +514,8 @@ function extraerBloquesNativos(
   }
 
 
-  // Líneas huérfanas (por encima de todos los titulares): las agrupamos
-  // como un bloque adicional solo si suman contenido relevante.
-  if (sueltas.length > 5) {
-    const raw = sueltas
-      .sort((a, b) => (b.y - a.y) || (a.x - b.x))
-      .map((l) => l.text)
-      .join("\n");
-    const limpio = limpiarTexto(raw);
-    if (limpio.length > 80 && !esRuidoMaquetacion(limpio)) {
-      const meta = extraerMetadatos(limpio, "");
-      bloques.push({
-        text: limpio,
-        fecha: meta.fecha || undefined,
-        hora: meta.hora || undefined,
-      });
-    }
-  }
+
+
 
   return bloques;
 }
