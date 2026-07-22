@@ -1202,14 +1202,60 @@ export default function SocidaPressApp() {
     metadata.fecha &&
     metadata.hora;
 
+  // Construye el objeto persistente a partir del estado actual de edición.
+  const buildSavedNoticia = (id: string, createdAt: number): SavedNoticia => ({
+    id,
+    createdAt,
+    updatedAt: Date.now(),
+    periodico: metadata.periodico,
+    titulo: metadata.titulo,
+    fecha: metadata.fecha,
+    hora: metadata.hora,
+    bloques: finalTexts.map((t) => {
+      const pi = pageImages.find((p) => p.page === t.page);
+      return {
+        id: t.id,
+        page: t.page,
+        titulo: t.titulo ?? "",
+        fecha: t.fecha ?? "",
+        hora: t.hora ?? "",
+        texto: t.text,
+        imagenPagina: pi?.fullDataUrl ?? null,
+        imagenSeciones: undefined,
+        imagenSeleccion: pi?.cropDataUrl ?? null,
+      };
+    }),
+    imagenes: finalImages.map((i) => ({
+      id: i.id,
+      dataUrl: i.dataUrl,
+      ancho: i.width,
+      alto: i.height,
+    })),
+  });
+
   const handleFinish = () => {
     if (!canFinish) {
       toast.error("Revisa periódico, título, fecha y hora antes de guardar.");
       return;
     }
+    const id = `n_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const noticia = buildSavedNoticia(id, Date.now());
+    persist([noticia, ...saved]);
+    setLastSavedId(id);
     setStage("done");
-    toast.success("Noticia guardada correctamente.");
+    toast.success("Noticia guardada en la biblioteca.");
   };
+
+  const openLibrary = () => setStage("library");
+  const deleteNoticia = (id: string) => {
+    persist(saved.filter((n) => n.id !== id));
+    if (editingId === id) setEditingId(null);
+    toast.success("Noticia eliminada.");
+  };
+  const updateNoticia = (updated: SavedNoticia) => {
+    persist(saved.map((n) => (n.id === updated.id ? { ...updated, updatedAt: Date.now() } : n)));
+  };
+
 
   const handleExport = () => {
     const payload = {
