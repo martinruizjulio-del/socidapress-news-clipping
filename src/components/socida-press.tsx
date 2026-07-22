@@ -278,7 +278,7 @@ type NativeItem = {
 // un titular grande) forma UN bloque aunque su cuerpo esté maquetado en
 // varias columnas dentro del mismo recuadro. Devuelve además fecha y hora
 // detectadas dentro de cada bloque cuando aparecen.
-function extraerBloquesNativos(
+export function extraerBloquesNativos(
   items: NativeItem[],
 ): { titulo?: string; text: string; fecha?: string; hora?: string }[] {
   if (!items.length) return [];
