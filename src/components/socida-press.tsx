@@ -364,7 +364,13 @@ function extraerBloquesNativos(
   // Semillas: titulares principales ordenados de arriba abajo.
   const semillas = limpias.filter(esHeadline).sort(porYDesc);
 
-  type Articulo = { headlineTop: number; headlineBottom: number; titulo: string };
+  type Articulo = {
+    headlineTop: number;
+    headlineBottom: number;
+    xLeft: number;
+    xRight: number;
+    titulo: string;
+  };
   const articulos: Articulo[] = [];
 
   // Ampliamos cada semilla con las líneas cercanas por debajo cuyo tamaño
@@ -375,7 +381,6 @@ function extraerBloquesNativos(
     if (consumidas.has(seed)) continue;
     const cluster: Linea[] = [seed];
     consumidas.add(seed);
-    // Candidatas por debajo del titular, ordenadas de arriba abajo.
     const debajo = limpias
       .filter((l) => !consumidas.has(l) && l.y < seed.y)
       .sort(porYDesc);
@@ -383,7 +388,6 @@ function extraerBloquesNativos(
     for (const l of debajo) {
       const gap = yRef - l.y;
       if (gap > Math.max(seed.size, l.size) * 2.5) break;
-      // Nueva semilla principal a la vista: paramos, no la absorbemos.
       if (esHeadline(l) && Math.abs(l.size - seed.size) > seed.size * 0.15) break;
       const mismaFuente = Math.abs(l.size - seed.size) <= seed.size * 0.15;
       if (mismaFuente || esSubtitular(l)) {
@@ -392,26 +396,30 @@ function extraerBloquesNativos(
         yRef = l.y;
         continue;
       }
-      // Línea a tamaño de cuerpo: fin del bloque de titular.
       break;
     }
     const top = Math.max(...cluster.map((l) => l.y));
     const bottom = Math.min(...cluster.map((l) => l.y));
+    const xLeft = Math.min(...cluster.map((l) => l.x));
+    const xRight = Math.max(...cluster.map((l) => l.xEnd));
     const titulo = cluster
       .sort(porYDesc)
       .map((l) => l.text)
       .join(" ")
       .replace(/\s+/g, " ")
       .trim();
-    articulos.push({ headlineTop: top, headlineBottom: bottom, titulo });
+    articulos.push({
+      headlineTop: top,
+      headlineBottom: bottom,
+      xLeft,
+      xRight,
+      titulo,
+    });
   }
 
   articulos.sort((a, b) => b.headlineTop - a.headlineTop);
 
-
-
-  // Si no hay titulares detectados, tratamos toda la página como un bloque
-  // (por ejemplo páginas con solo cuerpo). Se conservan las líneas ordenadas.
+  // Si no hay titulares detectados, tratamos toda la página como un bloque.
   if (articulos.length === 0) {
     const raw = limpias
       .sort((a, b) => (b.y - a.y) || (a.x - b.x))
@@ -425,60 +433,75 @@ function extraerBloquesNativos(
     return [];
   }
 
-  // 3) Asignar cada línea de cuerpo a la noticia cuyo titular esté justo
-  //    encima (mayor y, pero por encima de la línea). Esto permite que
-  //    varias columnas del mismo recuadro pertenezcan al mismo bloque.
-  const cuerpos: Linea[][] = articulos.map(() => []);
-  const sueltas: Linea[] = [];
-  for (const l of limpias) {
-    if (consumidas.has(l)) continue; // ya forma parte de un titular/deck
-    if (esHeadline(l)) continue;
-    // Ignora líneas que son ruido de maquetación (firmas, folios, créditos,
-    // antetítulos en mayúsculas, etiquetas de sección) para que no
-    // contaminen el cuerpo de la noticia.
-    if (esLineaRuido(l.text)) continue;
-    if (esEtiquetaSeccion(l.text) && l.size <= median * 1.3) continue;
-    // Pull-quotes: líneas con fuente medianamente grande pero cortas y
-    // aisladas en su propia columna estrecha suelen ser destacados;
-    // los omitimos porque duplican texto del propio cuerpo.
-    if (l.size >= median * 1.25 && l.size < median * 1.8 && l.text.length < 60) continue;
+  // 3) Para cada noticia, calculamos su "caja" de cuerpo: se extiende desde
+  //    debajo del titular hasta el siguiente titular cuyo rango horizontal
+  //    solape con el nuestro (esa es la frontera vertical real dentro del
+  //    recuadro). Sólo se aceptan líneas cuyo tamaño sea coherente con el
+  //    cuerpo (median ± 20%) y cuyo centro X caiga dentro del rango
+  //    horizontal del titular; así evitamos absorber columnas de otras
+  //    noticias, pies de foto pequeños o destacados grandes.
+  const tolX = median * 2;
+  const solapa = (a: Articulo, b: Articulo) =>
+    !(a.xRight + tolX < b.xLeft || b.xRight + tolX < a.xLeft);
 
-    let mejor = -1;
-    let mejorDy = Infinity;
-    for (let i = 0; i < articulos.length; i++) {
-      const hy = articulos[i].headlineBottom;
-      // La línea de cuerpo debe estar por debajo (o casi) del titular.
-      if (hy >= l.y - median * 0.5) {
-        const dy = hy - l.y;
-        if (dy < mejorDy) {
-          mejorDy = dy;
-          mejor = i;
-        }
-      }
+  const cuerpos: Linea[][] = articulos.map((art) => {
+    let yTope = -Infinity;
+    for (const otro of articulos) {
+      if (otro === art) continue;
+      if (otro.headlineTop >= art.headlineBottom) continue; // está por encima
+      if (!solapa(art, otro)) continue;
+      if (otro.headlineTop > yTope) yTope = otro.headlineTop;
     }
-    if (mejor >= 0) cuerpos[mejor].push(l);
-    else sueltas.push(l);
-  }
+    const sizeMin = median * 0.85;
+    const sizeMax = median * 1.2;
+    return limpias.filter((l) => {
+      if (consumidas.has(l)) return false;
+      if (esHeadline(l)) return false;
+      if (esLineaRuido(l.text)) return false;
+      if (esEtiquetaSeccion(l.text) && l.size <= median * 1.3) return false;
+      if (l.size < sizeMin || l.size > sizeMax) return false;
+      if (l.y >= art.headlineBottom) return false;
+      if (l.y <= yTope) return false;
+      const cx = (l.x + l.xEnd) / 2;
+      if (cx < art.xLeft - tolX || cx > art.xRight + tolX) return false;
+      return true;
+    });
+  });
 
-
-  // 4) Componer cada bloque respetando el orden de lectura: columnas de
-  //    izquierda a derecha, y dentro de cada columna de arriba abajo.
+  // 4) Componer cada bloque respetando el orden de lectura: detectamos las
+  //    columnas reales del artículo agrupando los x de sus propias líneas
+  //    en clusters separados por huecos claros; después leemos columna por
+  //    columna de izquierda a derecha, y dentro de cada una de arriba abajo.
   const bloques: { titulo?: string; text: string; fecha?: string; hora?: string }[] = [];
-  const anchoColumna = median * 12; // ~12 caracteres = ancho típico de columna
   for (let i = 0; i < articulos.length; i++) {
     const art = articulos[i];
     const lineasCuerpo = cuerpos[i];
     if (!lineasCuerpo.length) continue;
+
+    const xs = [...lineasCuerpo.map((l) => l.x)].sort((a, b) => a - b);
+    const gapCol = median * 3; // hueco mínimo entre columnas
+    const colStarts: number[] = [];
+    for (const x of xs) {
+      if (!colStarts.length || x - colStarts[colStarts.length - 1] > gapCol) {
+        colStarts.push(x);
+      }
+    }
+    const colIndex = (x: number) => {
+      let idx = 0;
+      for (let k = 0; k < colStarts.length; k++) {
+        if (x >= colStarts[k] - median) idx = k;
+      }
+      return idx;
+    };
+
     lineasCuerpo.sort((a, b) => {
-      const ca = Math.floor(a.x / anchoColumna);
-      const cb = Math.floor(b.x / anchoColumna);
+      const ca = colIndex(a.x);
+      const cb = colIndex(b.x);
       if (ca !== cb) return ca - cb;
       return b.y - a.y;
     });
     const raw = lineasCuerpo.map((l) => l.text).join("\n");
     const limpio = limpiarTexto(raw);
-
-
 
     if (limpio.length < 40 || esRuidoMaquetacion(limpio)) continue;
     const meta = extraerMetadatos(`${limpio}\n${art.titulo}`, "");
@@ -489,6 +512,7 @@ function extraerBloquesNativos(
       hora: meta.hora || undefined,
     });
   }
+
 
   // Líneas huérfanas (por encima de todos los titulares): las agrupamos
   // como un bloque adicional solo si suman contenido relevante.
