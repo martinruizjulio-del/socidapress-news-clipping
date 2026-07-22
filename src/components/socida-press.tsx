@@ -728,8 +728,275 @@ function RegionPicker({
   );
 }
 
+interface LibraryViewProps {
+  noticias: SavedNoticia[];
+  editingId: string | null;
+  highlightId: string | null;
+  onEdit: (id: string | null) => void;
+  onDelete: (id: string) => void;
+  onUpdate: (n: SavedNoticia) => void;
+  onNew: () => void;
+}
 
+function LibraryView({
+  noticias,
+  editingId,
+  highlightId,
+  onEdit,
+  onDelete,
+  onUpdate,
+  onNew,
+}: LibraryViewProps) {
+  const editing = noticias.find((n) => n.id === editingId) ?? null;
+  const [draft, setDraft] = useState<SavedNoticia | null>(editing);
+  useEffect(() => {
+    setDraft(editing ? JSON.parse(JSON.stringify(editing)) : null);
+  }, [editingId, editing]);
 
+  if (editing && draft) {
+    const updateBlock = (bid: string, patch: Partial<SavedBlock>) => {
+      setDraft({
+        ...draft,
+        bloques: draft.bloques.map((b) => (b.id === bid ? { ...b, ...patch } : b)),
+      });
+    };
+    const removeBlock = (bid: string) => {
+      setDraft({ ...draft, bloques: draft.bloques.filter((b) => b.id !== bid) });
+    };
+    return (
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={() => onEdit(null)} className="gap-2">
+              <ArrowLeft className="h-4 w-4" />
+              Volver
+            </Button>
+            <CardTitle>Editar noticia</CardTitle>
+          </div>
+          <div className="flex gap-2">
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => {
+                if (confirm("¿Eliminar esta noticia de la biblioteca?")) {
+                  onDelete(draft.id);
+                  onEdit(null);
+                }
+              }}
+              className="gap-2"
+            >
+              <Trash2 className="h-4 w-4" />
+              Eliminar
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => {
+                onUpdate(draft);
+                toast.success("Cambios guardados.");
+                onEdit(null);
+              }}
+              className="gap-2"
+            >
+              <Save className="h-4 w-4" />
+              Guardar cambios
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label>Periódico</Label>
+              <Input
+                value={draft.periodico}
+                onChange={(e) => setDraft({ ...draft, periodico: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Titular</Label>
+              <Input
+                value={draft.titulo}
+                onChange={(e) => setDraft({ ...draft, titulo: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Fecha</Label>
+              <Input
+                value={draft.fecha}
+                onChange={(e) => setDraft({ ...draft, fecha: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Hora</Label>
+              <Input
+                value={draft.hora}
+                onChange={(e) => setDraft({ ...draft, hora: e.target.value })}
+              />
+            </div>
+          </div>
+
+          <Separator />
+
+          <div className="space-y-4">
+            <h3 className="text-sm font-semibold">
+              Bloques de texto ({draft.bloques.length})
+            </h3>
+            {draft.bloques.map((b) => (
+              <div key={b.id} className="space-y-3 rounded-md border bg-muted/30 p-4">
+                <div className="grid gap-3 md:grid-cols-3">
+                  <div className="space-y-1 md:col-span-3">
+                    <Label className="text-xs">Título del bloque</Label>
+                    <Input
+                      value={b.titulo}
+                      onChange={(e) => updateBlock(b.id, { titulo: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Fecha</Label>
+                    <Input
+                      value={b.fecha}
+                      onChange={(e) => updateBlock(b.id, { fecha: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Hora</Label>
+                    <Input
+                      value={b.hora}
+                      onChange={(e) => updateBlock(b.id, { hora: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Página</Label>
+                    <Input value={String(b.page)} disabled />
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Texto</Label>
+                  <Textarea
+                    rows={8}
+                    value={b.texto}
+                    onChange={(e) => updateBlock(b.id, { texto: e.target.value })}
+                  />
+                </div>
+                {(b.imagenPagina || b.imagenSeleccion) && (
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {b.imagenPagina && (
+                      <a href={b.imagenPagina} target="_blank" rel="noreferrer">
+                        <img
+                          src={b.imagenPagina}
+                          alt={`Página ${b.page}`}
+                          loading="lazy"
+                          className="w-full rounded border"
+                        />
+                      </a>
+                    )}
+                    {b.imagenSeleccion && (
+                      <a href={b.imagenSeleccion} target="_blank" rel="noreferrer">
+                        <img
+                          src={b.imagenSeleccion}
+                          alt={`Selección página ${b.page}`}
+                          loading="lazy"
+                          className="w-full rounded border"
+                        />
+                      </a>
+                    )}
+                  </div>
+                )}
+                <div className="flex justify-end">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => removeBlock(b.id)}
+                    className="gap-2 text-destructive"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Quitar bloque
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
+        <CardTitle>Biblioteca de noticias</CardTitle>
+        <Button size="sm" onClick={onNew} className="gap-2">
+          <FileUp className="h-4 w-4" />
+          Nueva noticia
+        </Button>
+      </CardHeader>
+      <CardContent>
+        {noticias.length === 0 ? (
+          <p className="py-8 text-center text-sm text-muted-foreground">
+            Todavía no has guardado ninguna noticia. Importa un PDF para empezar.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {noticias.map((n) => (
+              <div
+                key={n.id}
+                className={`flex flex-col gap-3 rounded-md border p-4 md:flex-row md:items-center ${
+                  n.id === highlightId ? "border-primary" : ""
+                }`}
+              >
+                {n.bloques[0]?.imagenSeleccion || n.bloques[0]?.imagenPagina ? (
+                  <img
+                    src={
+                      n.bloques[0]?.imagenSeleccion ?? n.bloques[0]?.imagenPagina ?? ""
+                    }
+                    alt=""
+                    loading="lazy"
+                    className="h-24 w-32 shrink-0 rounded border object-cover"
+                  />
+                ) : (
+                  <div className="flex h-24 w-32 shrink-0 items-center justify-center rounded border bg-muted text-muted-foreground">
+                    <Newspaper className="h-6 w-6" />
+                  </div>
+                )}
+                <div className="flex-1">
+                  <h3 className="font-semibold">{n.titulo || "(sin título)"}</h3>
+                  <p className="text-xs text-muted-foreground">
+                    {n.periodico} · {n.fecha || "fecha por determinar"} ·{" "}
+                    {n.hora || "hora por determinar"}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {n.bloques.length} bloque(s) · guardada el{" "}
+                    {new Date(n.updatedAt).toLocaleString("es-ES")}
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onEdit(n.id)}
+                    className="gap-2"
+                  >
+                    <Pencil className="h-4 w-4" />
+                    Ver / editar
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      if (confirm("¿Eliminar esta noticia?")) onDelete(n.id);
+                    }}
+                    className="gap-2 text-destructive"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 
 export default function SocidaPressApp() {
