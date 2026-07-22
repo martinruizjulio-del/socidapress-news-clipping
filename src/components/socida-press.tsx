@@ -599,9 +599,12 @@ export default function SocidaPressApp() {
               id: `txt-${page}-${i}`,
               page,
               titulo: b.titulo,
+              fecha: b.fecha,
+              hora: b.hora,
               text: b.text,
             });
           });
+
         } else {
           paginasSinTexto.push({ page, canvas });
         }
