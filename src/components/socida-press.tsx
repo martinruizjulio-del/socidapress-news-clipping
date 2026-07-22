@@ -364,6 +364,16 @@ function extraerBloquesNativos(
   const sueltas: Linea[] = [];
   for (const l of limpias) {
     if (esHeadline(l)) continue;
+    // Ignora líneas que son ruido de maquetación (firmas, folios, créditos,
+    // antetítulos en mayúsculas, etiquetas de sección) para que no
+    // contaminen el cuerpo de la noticia.
+    if (esLineaRuido(l.text)) continue;
+    if (esEtiquetaSeccion(l.text) && l.size <= median * 1.3) continue;
+    // Pull-quotes: líneas con fuente medianamente grande pero cortas y
+    // aisladas en su propia columna estrecha suelen ser destacados;
+    // los omitimos porque duplican texto del propio cuerpo.
+    if (l.size >= median * 1.25 && l.size < median * 1.8 && l.text.length < 60) continue;
+
     let mejor = -1;
     let mejorDy = Infinity;
     for (let i = 0; i < articulos.length; i++) {
