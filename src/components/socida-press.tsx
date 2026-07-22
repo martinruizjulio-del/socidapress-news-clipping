@@ -38,6 +38,14 @@ interface Metadata {
 
 type Stage = "form" | "region" | "processing" | "select" | "done";
 
+// Imagen completa de una página + (opcional) recorte de la zona marcada.
+// Sirve como "prueba visual" que acompaña a los bloques extraídos.
+interface PageImage {
+  page: number;
+  fullDataUrl: string;
+  cropDataUrl?: string;
+}
+
 // Rectángulo de recorte en coordenadas de usuario del PDF (mismo espacio que
 // los items de texto nativos y el viewBox de pdfjs).
 type PdfRect = { xMin: number; xMax: number; yMin: number; yMax: number };
@@ -683,6 +691,7 @@ export default function SocidaPressApp() {
   const [selectedImgIds, setSelectedImgIds] = useState<Set<string>>(new Set());
   const [selectedTextIds, setSelectedTextIds] = useState<Set<string>>(new Set());
   const [thumbs, setThumbs] = useState<PageThumb[]>([]);
+  const [pageImages, setPageImages] = useState<PageImage[]>([]);
   const [regions, setRegions] = useState<Record<number, PdfRect>>({});
   const pdfRef = useRef<unknown>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -698,6 +707,7 @@ export default function SocidaPressApp() {
     setProgress(0);
     setProgressLabel("");
     setThumbs([]);
+    setPageImages([]);
     setRegions({});
     pdfRef.current = null;
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -964,6 +974,25 @@ export default function SocidaPressApp() {
         }
       }
 
+      // Guardamos, por página, la imagen completa y (si hay zona marcada) el
+      // recorte, para poder acompañar cada bloque con su prueba visual.
+      const pageImgs: PageImage[] = pageCanvases.map(({ page, canvas, rectPx }) => {
+        const fullDataUrl = canvas.toDataURL("image/webp", 0.85);
+        let cropDataUrl: string | undefined;
+        if (rectPx && rectPx.w > 20 && rectPx.h > 20) {
+          const c = document.createElement("canvas");
+          c.width = Math.round(rectPx.w);
+          c.height = Math.round(rectPx.h);
+          const cctx = c.getContext("2d");
+          if (cctx) {
+            cctx.drawImage(canvas, rectPx.x, rectPx.y, rectPx.w, rectPx.h, 0, 0, c.width, c.height);
+            cropDataUrl = c.toDataURL("image/webp", 0.85);
+          }
+        }
+        return { page, fullDataUrl, cropDataUrl };
+      });
+      setPageImages(pageImgs);
+
       // 2) Construir bloques: preferimos texto nativo del PDF (limpio y con
       //    subtítulos por tamaño de fuente). Solo pasamos por OCR las páginas
       //    que no tengan capa de texto.
@@ -1118,18 +1147,31 @@ export default function SocidaPressApp() {
       titulo: metadata.titulo,
       fecha: metadata.fecha,
       hora: metadata.hora,
-      bloques: finalTexts.map((t) => ({
-        titulo: t.titulo ?? "",
-        fecha: t.fecha ?? "",
-        hora: t.hora ?? "",
-        texto: t.text,
-      })),
-
+      bloques: finalTexts.map((t) => {
+        const pi = pageImages.find((p) => p.page === t.page);
+        return {
+          pagina: t.page,
+          titulo: t.titulo ?? "",
+          fecha: t.fecha ?? "",
+          hora: t.hora ?? "",
+          texto: t.text,
+          // Imagen completa de la página de donde sale el bloque y, si el
+          // usuario marcó una zona en esa página, el recorte de la selección.
+          // Ambas van como data URL WebP para poder abrirlas por separado.
+          imagenPagina: pi?.fullDataUrl ?? null,
+          imagenSeleccion: pi?.cropDataUrl ?? null,
+        };
+      }),
       imagenes: finalImages.map((i) => ({
         pagina: i.page,
         ancho: i.width,
         alto: i.height,
         dataUrl: i.dataUrl,
+      })),
+      paginas: pageImages.map((p) => ({
+        pagina: p.page,
+        imagenPagina: p.fullDataUrl,
+        imagenSeleccion: p.cropDataUrl ?? null,
       })),
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
@@ -1505,16 +1547,74 @@ export default function SocidaPressApp() {
               )}
               {finalTexts.length > 0 && (
                 <div>
-                  <h3 className="mb-3 text-sm font-semibold">Texto</h3>
-                  <div className="space-y-3 rounded-md border bg-muted/30 p-4">
-                    {finalTexts.map((t) => (
-                      <div key={t.id} className="space-y-1">
-                        {t.titulo && (
-                          <h4 className="text-sm font-semibold">{t.titulo}</h4>
-                        )}
-                        <p className="whitespace-pre-wrap text-sm">{t.text}</p>
-                      </div>
-                    ))}
+                  <h3 className="mb-3 text-sm font-semibold">
+                    Bloques guardados ({finalTexts.length})
+                  </h3>
+                  <div className="space-y-6">
+                    {finalTexts.map((t) => {
+                      const pi = pageImages.find((p) => p.page === t.page);
+                      return (
+                        <div
+                          key={t.id}
+                          className="space-y-3 rounded-md border bg-muted/30 p-4"
+                        >
+                          <div className="space-y-1">
+                            {t.titulo && (
+                              <h4 className="text-base font-semibold">
+                                {t.titulo}
+                              </h4>
+                            )}
+                            <p className="text-xs text-muted-foreground">
+                              Página {t.page} · {t.fecha || "fecha por determinar"} ·{" "}
+                              {t.hora || "hora por determinar"}
+                            </p>
+                          </div>
+                          {(pi?.fullDataUrl || pi?.cropDataUrl) && (
+                            <div className="grid gap-3 md:grid-cols-2">
+                              {pi?.fullDataUrl && (
+                                <figure className="space-y-1">
+                                  <a
+                                    href={pi.fullDataUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    <img
+                                      src={pi.fullDataUrl}
+                                      alt={`Página ${t.page} completa`}
+                                      loading="lazy"
+                                      className="w-full rounded border"
+                                    />
+                                  </a>
+                                  <figcaption className="text-xs text-muted-foreground">
+                                    Página completa
+                                  </figcaption>
+                                </figure>
+                              )}
+                              {pi?.cropDataUrl && (
+                                <figure className="space-y-1">
+                                  <a
+                                    href={pi.cropDataUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    <img
+                                      src={pi.cropDataUrl}
+                                      alt={`Selección de la página ${t.page}`}
+                                      loading="lazy"
+                                      className="w-full rounded border"
+                                    />
+                                  </a>
+                                  <figcaption className="text-xs text-muted-foreground">
+                                    Selección marcada
+                                  </figcaption>
+                                </figure>
+                              )}
+                            </div>
+                          )}
+                          <p className="whitespace-pre-wrap text-sm">{t.text}</p>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}
