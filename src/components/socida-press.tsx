@@ -646,7 +646,7 @@ export default function SocidaPressApp() {
                     <Label htmlFor="fecha">Fecha</Label>
                     <Input
                       id="fecha"
-                      type="date"
+                      type={metadata.fecha === "por determinar" ? "text" : "date"}
                       value={metadata.fecha}
                       onChange={(e) =>
                         setMetadata({ ...metadata, fecha: e.target.value })
@@ -657,13 +657,14 @@ export default function SocidaPressApp() {
                     <Label htmlFor="hora">Hora</Label>
                     <Input
                       id="hora"
-                      type="time"
+                      type={metadata.hora === "por determinar" ? "text" : "time"}
                       value={metadata.hora}
                       onChange={(e) =>
                         setMetadata({ ...metadata, hora: e.target.value })
                       }
                     />
                   </div>
+
                 </div>
               </CardContent>
             </Card>
