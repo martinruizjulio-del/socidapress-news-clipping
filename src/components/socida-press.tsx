@@ -633,12 +633,19 @@ export default function SocidaPressApp() {
       pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
       setProgressLabel("Leyendo PDF…");
-      const buf = await file.arrayBuffer();
-      const pdf = await pdfjs.getDocument({ data: buf }).promise;
+      // Reutilizamos el documento ya cargado en el paso de "zona" si existe.
+      type PdfDocLike = {
+        numPages: number;
+        getPage: (n: number) => Promise<unknown>;
+      };
+      const pdf: PdfDocLike =
+        (pdfRef.current as PdfDocLike | null) ??
+        (await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise);
+      pdfRef.current = pdf;
       const numPages = pdf.numPages;
 
       const foundImages: ExtractedImage[] = [];
-      const pageCanvases: { page: number; canvas: HTMLCanvasElement }[] = [];
+      const pageCanvases: { page: number; canvas: HTMLCanvasElement; rectPx?: { x: number; y: number; w: number; h: number } }[] = [];
       const nativePageTexts: { page: number; text: string }[] = [];
       const nativePageItems: { page: number; items: NativeItem[] }[] = [];
       let tituloDetectado = "";
@@ -649,7 +656,17 @@ export default function SocidaPressApp() {
         setProgressLabel(`Analizando página ${p} de ${numPages}…`);
         setProgress(5 + Math.round(((p - 1) / numPages) * 40));
 
-        const page = await pdf.getPage(p);
+        const page = (await pdf.getPage(p)) as {
+          getViewport: (o: { scale: number }) => {
+            width: number;
+            height: number;
+            viewBox: number[];
+          };
+          render: (o: { canvasContext: CanvasRenderingContext2D; viewport: unknown }) => { promise: Promise<void> };
+          getTextContent: () => Promise<{ items: unknown[] }>;
+          getOperatorList: () => Promise<{ fnArray: number[]; argsArray: unknown[][] }>;
+          objs: { get: (n: string, cb: (o: unknown) => void) => void };
+        };
         const viewport = page.getViewport({ scale: 2 });
         const canvas = document.createElement("canvas");
         canvas.width = viewport.width;
@@ -657,7 +674,27 @@ export default function SocidaPressApp() {
         const ctx = canvas.getContext("2d");
         if (!ctx) continue;
         await page.render({ canvasContext: ctx, viewport }).promise;
-        pageCanvases.push({ page: p, canvas });
+
+        // Si el usuario ha marcado una zona para esta página, calculamos el
+        // rectángulo equivalente en píxeles del canvas para poder recortar
+        // el OCR más adelante.
+        const rectPdf = regions[p];
+        let rectPx: { x: number; y: number; w: number; h: number } | undefined;
+        if (rectPdf) {
+          const [vx0, vy0, vx1, vy1] = viewport.viewBox as [number, number, number, number];
+          const pdfW = vx1 - vx0;
+          const pdfH = vy1 - vy0;
+          const sx = canvas.width / pdfW;
+          const sy = canvas.height / pdfH;
+          const x = (rectPdf.xMin - vx0) * sx;
+          const w = (rectPdf.xMax - rectPdf.xMin) * sx;
+          // Coordenada Y del PDF es ascendente; en canvas es descendente.
+          const y = (vy1 - rectPdf.yMax) * sy;
+          const h = (rectPdf.yMax - rectPdf.yMin) * sy;
+          rectPx = { x, y, w, h };
+        }
+        pageCanvases.push({ page: p, canvas, rectPx });
+
 
         // Extraer texto nativo del PDF (mucho más fiable que OCR).
         try {
