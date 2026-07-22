@@ -39,7 +39,7 @@ function canvasToWebp(canvas: HTMLCanvasElement): string {
   return canvas.toDataURL("image/webp", 0.92);
 }
 
-// Renderiza una imagen de pdfjs (con .data, .width, .height, .kind) a dataURL
+// Renderiza una imagen de pdfjs a dataURL
 function pdfImageToDataUrl(img: {
   data: Uint8ClampedArray | Uint8Array;
   width: number;
@@ -56,7 +56,6 @@ function pdfImageToDataUrl(img: {
     if (!ctx) return null;
     const imageData = ctx.createImageData(width, height);
     const dst = imageData.data;
-    // kind: 1 = grayscale (1 byte/px), 2 = RGB (3 bytes/px), 3 = RGBA (4 bytes/px)
     if (kind === 1) {
       for (let i = 0, j = 0; i < data.length; i++, j += 4) {
         dst[j] = data[i];
@@ -72,7 +71,6 @@ function pdfImageToDataUrl(img: {
         dst[j + 3] = 255;
       }
     } else {
-      // Asumimos RGBA
       dst.set(data);
     }
     ctx.putImageData(imageData, 0, 0);
@@ -82,13 +80,83 @@ function pdfImageToDataUrl(img: {
   }
 }
 
+// Meses en español para reconocer fechas escritas con letras
+const MESES: Record<string, string> = {
+  enero: "01", febrero: "02", marzo: "03", abril: "04", mayo: "05", junio: "06",
+  julio: "07", agosto: "08", septiembre: "09", setiembre: "09", octubre: "10",
+  noviembre: "11", diciembre: "12",
+};
+
+// Intenta extraer periódico, título, fecha y hora del texto OCR
+function extraerMetadatos(pages: { page: number; text: string }[]): Metadata {
+  const md: Metadata = { periodico: "", titulo: "", fecha: "", hora: "" };
+  const firstPage = pages[0]?.text ?? "";
+  const fullText = pages.map((p) => p.text).join("\n");
+
+  // Líneas útiles de la primera página
+  const lines = firstPage
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  // Periódico: primera línea corta razonable (habitualmente la cabecera)
+  const cabecera = lines.find(
+    (l) => l.length >= 3 && l.length <= 40 && /[A-Za-zÁÉÍÓÚÑáéíóúñ]/.test(l),
+  );
+  if (cabecera) md.periodico = cabecera.replace(/\s+/g, " ");
+
+  // Título: línea más larga entre las primeras 15, con longitud razonable
+  const candidatas = lines.slice(0, 15).filter(
+    (l) => l.length >= 15 && l.length <= 180 && !/^\d+$/.test(l),
+  );
+  if (candidatas.length) {
+    candidatas.sort((a, b) => b.length - a.length);
+    // Evitamos coger la cabecera como título
+    const titulo = candidatas.find((l) => l !== cabecera) ?? candidatas[0];
+    md.titulo = titulo;
+  }
+
+  // Fecha: varios formatos
+  // dd/mm/yyyy o dd-mm-yyyy
+  const mNum = fullText.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/);
+  if (mNum) {
+    const d = mNum[1].padStart(2, "0");
+    const m = mNum[2].padStart(2, "0");
+    let y = mNum[3];
+    if (y.length === 2) y = (parseInt(y, 10) > 50 ? "19" : "20") + y;
+    md.fecha = `${y}-${m}-${d}`;
+  }
+  if (!md.fecha) {
+    // "12 de marzo de 2024"
+    const re = new RegExp(
+      `\\b(\\d{1,2})\\s+de\\s+(${Object.keys(MESES).join("|")})\\s+de\\s+(\\d{4})\\b`,
+      "i",
+    );
+    const mTxt = fullText.match(re);
+    if (mTxt) {
+      const d = mTxt[1].padStart(2, "0");
+      const m = MESES[mTxt[2].toLowerCase()];
+      const y = mTxt[3];
+      md.fecha = `${y}-${m}-${d}`;
+    }
+  }
+
+  // Hora: HH:MM (24h o con h)
+  const mHora = fullText.match(/\b([01]?\d|2[0-3])[:.h]([0-5]\d)\b/);
+  if (mHora) {
+    md.hora = `${mHora[1].padStart(2, "0")}:${mHora[2]}`;
+  }
+
+  return md;
+}
+
 export default function SocidaPressApp() {
   const [stage, setStage] = useState<Stage>("form");
   const [metadata, setMetadata] = useState<Metadata>({
     periodico: "",
     titulo: "",
-    fecha: new Date().toISOString().slice(0, 10),
-    hora: new Date().toTimeString().slice(0, 5),
+    fecha: "",
+    hora: "",
   });
   const [file, setFile] = useState<File | null>(null);
   const [progress, setProgress] = useState(0);
@@ -99,13 +167,6 @@ export default function SocidaPressApp() {
   const [selectedTextIds, setSelectedTextIds] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const canProcess =
-    metadata.periodico.trim() &&
-    metadata.titulo.trim() &&
-    metadata.fecha &&
-    metadata.hora &&
-    file;
-
   const handleReset = () => {
     setStage("form");
     setFile(null);
@@ -113,6 +174,7 @@ export default function SocidaPressApp() {
     setTextBlocks([]);
     setSelectedImgIds(new Set());
     setSelectedTextIds(new Set());
+    setMetadata({ periodico: "", titulo: "", fecha: "", hora: "" });
     setProgress(0);
     setProgressLabel("");
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -153,7 +215,6 @@ export default function SocidaPressApp() {
         await page.render({ canvasContext: ctx, viewport, canvas }).promise;
         pageCanvases.push({ page: p, canvas });
 
-        // Extraer imágenes embebidas
         try {
           const opList = await page.getOperatorList();
           const OPS = pdfjs.OPS;
@@ -171,7 +232,6 @@ export default function SocidaPressApp() {
               try {
                 const img: unknown = await new Promise((resolve) => {
                   try {
-                    // pdfjs v6: page.objs.get admite callback
                     (page as unknown as {
                       objs: { get: (n: string, cb: (o: unknown) => void) => void };
                     }).objs.get(name, resolve);
@@ -194,7 +254,6 @@ export default function SocidaPressApp() {
                     const cx = c.getContext("2d");
                     if (cx) {
                       cx.drawImage(typed.bitmap, 0, 0);
-                      // Filtrar imágenes minúsculas (iconos, líneas)
                       if (c.width >= 80 && c.height >= 80) {
                         foundImages.push({
                           id: `img-${p}-${foundImages.length}`,
@@ -238,47 +297,46 @@ export default function SocidaPressApp() {
       setProgressLabel("Preparando OCR…");
       setProgress(48);
       const tesseract = await import("tesseract.js");
-      const worker = await tesseract.createWorker("spa", 1, {
-        logger: (m: { status: string; progress: number }) => {
-          if (m.status === "recognizing text") {
-            // no-op individual, actualizamos por página abajo
-          }
-        },
-      });
+      const worker = await tesseract.createWorker("spa", 1);
 
       const blocks: ExtractedTextBlock[] = [];
+      const pagesText: { page: number; text: string }[] = [];
       for (let idx = 0; idx < pageCanvases.length; idx++) {
         const { page, canvas } = pageCanvases[idx];
         setProgressLabel(`OCR página ${page} de ${numPages}…`);
         setProgress(50 + Math.round(((idx + 1) / pageCanvases.length) * 48));
         const { data } = await worker.recognize(canvas);
-        // Dividimos por doble salto de línea -> bloques/párrafos
         const raw = (data.text || "").trim();
+        pagesText.push({ page, text: raw });
         if (!raw) continue;
         const chunks = raw
           .split(/\n\s*\n+/g)
           .map((s) => s.replace(/\s+\n/g, "\n").trim())
-          .filter((s) => s.length > 30); // descartamos fragmentos triviales
+          .filter((s) => s.length > 30);
         chunks.forEach((c, i) => {
-          blocks.push({
-            id: `txt-${page}-${i}`,
-            page,
-            text: c,
-          });
+          blocks.push({ id: `txt-${page}-${i}`, page, text: c });
         });
       }
       await worker.terminate();
+
+      // 3) Extraer metadatos a partir del OCR
+      const meta = extraerMetadatos(pagesText);
+      // Fallback: si no encontramos fecha/hora, usamos las actuales
+      if (!meta.fecha) meta.fecha = new Date().toISOString().slice(0, 10);
+      if (!meta.hora) meta.hora = new Date().toTimeString().slice(0, 5);
+      setMetadata(meta);
 
       setProgress(100);
       setProgressLabel("Listo");
       setImages(foundImages);
       setTextBlocks(blocks);
-      // Preseleccionamos todo
       setSelectedImgIds(new Set(foundImages.map((i) => i.id)));
       setSelectedTextIds(new Set(blocks.map((b) => b.id)));
 
       if (foundImages.length === 0 && blocks.length === 0) {
         toast.warning("No se ha extraído contenido del PDF.");
+      } else {
+        toast.success("Datos extraídos. Revisa y ajusta si es necesario.");
       }
       setStage("select");
     } catch (err) {
@@ -314,7 +372,17 @@ export default function SocidaPressApp() {
     [textBlocks, selectedTextIds],
   );
 
+  const canFinish =
+    metadata.periodico.trim() &&
+    metadata.titulo.trim() &&
+    metadata.fecha &&
+    metadata.hora;
+
   const handleFinish = () => {
+    if (!canFinish) {
+      toast.error("Revisa periódico, título, fecha y hora antes de guardar.");
+      return;
+    }
     setStage("done");
     toast.success("Noticia guardada correctamente.");
   };
@@ -369,78 +437,32 @@ export default function SocidaPressApp() {
               <CardTitle>Nueva noticia</CardTitle>
             </CardHeader>
             <CardContent className="space-y-6">
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="periodico">Periódico</Label>
-                  <Input
-                    id="periodico"
-                    value={metadata.periodico}
-                    onChange={(e) =>
-                      setMetadata({ ...metadata, periodico: e.target.value })
-                    }
-                    placeholder="Ej. El País"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="titulo">Título de la noticia</Label>
-                  <Input
-                    id="titulo"
-                    value={metadata.titulo}
-                    onChange={(e) =>
-                      setMetadata({ ...metadata, titulo: e.target.value })
-                    }
-                    placeholder="Titular"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="fecha">Fecha</Label>
-                  <Input
-                    id="fecha"
-                    type="date"
-                    value={metadata.fecha}
-                    onChange={(e) =>
-                      setMetadata({ ...metadata, fecha: e.target.value })
-                    }
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="hora">Hora</Label>
-                  <Input
-                    id="hora"
-                    type="time"
-                    value={metadata.hora}
-                    onChange={(e) =>
-                      setMetadata({ ...metadata, hora: e.target.value })
-                    }
-                  />
-                </div>
-              </div>
-
-              <Separator />
-
               <div className="space-y-2">
                 <Label htmlFor="pdf">Archivo PDF de la noticia</Label>
-                <div className="flex items-center gap-3">
-                  <Input
-                    id="pdf"
-                    ref={fileInputRef}
-                    type="file"
-                    accept="application/pdf"
-                    onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-                  />
-                </div>
+                <Input
+                  id="pdf"
+                  ref={fileInputRef}
+                  type="file"
+                  accept="application/pdf"
+                  onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                />
                 {file && (
                   <p className="text-xs text-muted-foreground">
                     Seleccionado: {file.name} (
                     {(file.size / 1024 / 1024).toFixed(2)} MB)
                   </p>
                 )}
+                <p className="text-xs text-muted-foreground">
+                  Sube el PDF y SocidaPress intentará detectar automáticamente
+                  el periódico, el título, la fecha y la hora. Podrás revisarlos
+                  después.
+                </p>
               </div>
 
               <div className="flex justify-end">
                 <Button
                   onClick={processPdf}
-                  disabled={!canProcess}
+                  disabled={!file}
                   size="lg"
                   className="gap-2"
                 >
@@ -472,6 +494,66 @@ export default function SocidaPressApp() {
 
         {stage === "select" && (
           <div className="space-y-8">
+            <Card>
+              <CardHeader>
+                <CardTitle>Datos de la noticia</CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  Extraídos automáticamente del PDF. Revísalos y edítalos si es
+                  necesario.
+                </p>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="periodico">Periódico</Label>
+                    <Input
+                      id="periodico"
+                      value={metadata.periodico}
+                      onChange={(e) =>
+                        setMetadata({ ...metadata, periodico: e.target.value })
+                      }
+                      placeholder="Ej. El País"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="titulo">Título de la noticia</Label>
+                    <Input
+                      id="titulo"
+                      value={metadata.titulo}
+                      onChange={(e) =>
+                        setMetadata({ ...metadata, titulo: e.target.value })
+                      }
+                      placeholder="Titular"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="fecha">Fecha</Label>
+                    <Input
+                      id="fecha"
+                      type="date"
+                      value={metadata.fecha}
+                      onChange={(e) =>
+                        setMetadata({ ...metadata, fecha: e.target.value })
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="hora">Hora</Label>
+                    <Input
+                      id="hora"
+                      type="time"
+                      value={metadata.hora}
+                      onChange={(e) =>
+                        setMetadata({ ...metadata, hora: e.target.value })
+                      }
+                    />
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Separator />
+
             <Card>
               <CardHeader>
                 <CardTitle>Imágenes detectadas ({images.length})</CardTitle>
@@ -573,7 +655,7 @@ export default function SocidaPressApp() {
                 <RotateCcw className="h-4 w-4" />
                 Empezar de nuevo
               </Button>
-              <Button onClick={handleFinish} size="lg">
+              <Button onClick={handleFinish} size="lg" disabled={!canFinish}>
                 Guardar noticia
               </Button>
             </div>
