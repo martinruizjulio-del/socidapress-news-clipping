@@ -510,32 +510,55 @@ export default function SocidaPressApp() {
         }
       }
 
-      // 2) OCR por página
-      setProgressLabel("Preparando OCR…");
-      setProgress(48);
-      const tesseract = await import("tesseract.js");
-      const worker = await tesseract.createWorker("spa", 1);
-
+      // 2) Construir bloques: preferimos texto nativo del PDF (limpio y con
+      //    subtítulos por tamaño de fuente). Solo pasamos por OCR las páginas
+      //    que no tengan capa de texto.
       const blocks: ExtractedTextBlock[] = [];
       const pagesText: { page: number; text: string }[] = [];
-      for (let idx = 0; idx < pageCanvases.length; idx++) {
-        const { page, canvas } = pageCanvases[idx];
-        setProgressLabel(`OCR página ${page} de ${numPages}…`);
-        setProgress(50 + Math.round(((idx + 1) / pageCanvases.length) * 48));
-        const { data } = await worker.recognize(canvas);
-        const raw = (data.text || "").trim();
-        pagesText.push({ page, text: raw });
-        if (!raw) continue;
-        const chunks = raw
-          .split(/\n\s*\n+/g)
-          .map((s) => limpiarTexto(s))
-          // Filtramos elementos de maquetación: firmas, cabeceras, pies…
-          .filter((s) => s.length > 0 && !esRuidoMaquetacion(s));
-        chunks.forEach((c, i) => {
-          blocks.push({ id: `txt-${page}-${i}`, page, text: c });
-        });
+      const paginasSinTexto: { page: number; canvas: HTMLCanvasElement }[] = [];
+
+      for (const { page, canvas } of pageCanvases) {
+        const nativa = nativePageItems.find((n) => n.page === page);
+        if (nativa && nativa.items.length > 20) {
+          const bloques = extraerBloquesNativos(nativa.items);
+          bloques.forEach((b, i) => {
+            blocks.push({
+              id: `txt-${page}-${i}`,
+              page,
+              titulo: b.titulo,
+              text: b.text,
+            });
+          });
+        } else {
+          paginasSinTexto.push({ page, canvas });
+        }
       }
-      await worker.terminate();
+
+      if (paginasSinTexto.length) {
+        setProgressLabel("Preparando OCR…");
+        setProgress(48);
+        const tesseract = await import("tesseract.js");
+        const worker = await tesseract.createWorker("spa", 1);
+        for (let idx = 0; idx < paginasSinTexto.length; idx++) {
+          const { page, canvas } = paginasSinTexto[idx];
+          setProgressLabel(`OCR página ${page} de ${numPages}…`);
+          setProgress(50 + Math.round(((idx + 1) / paginasSinTexto.length) * 48));
+          const { data } = await worker.recognize(canvas);
+          const raw = (data.text || "").trim();
+          pagesText.push({ page, text: raw });
+          if (!raw) continue;
+          const chunks = raw
+            .split(/\n\s*\n+/g)
+            .map((s) => limpiarTexto(s))
+            .filter((s) => s.length > 40 && !esRuidoMaquetacion(s));
+          chunks.forEach((c, i) => {
+            blocks.push({ id: `ocr-${page}-${i}`, page, text: c });
+          });
+        }
+        await worker.terminate();
+      } else {
+        setProgress(96);
+      }
 
       // 3) Extraer metadatos combinando texto nativo del PDF (más fiable)
       //    y, si no hubiera capa de texto, el resultado del OCR.
