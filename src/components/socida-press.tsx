@@ -1,0 +1,639 @@
+import { useCallback, useMemo, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Progress } from "@/components/ui/progress";
+import { Separator } from "@/components/ui/separator";
+import { toast } from "sonner";
+import { Newspaper, FileUp, Download, RotateCcw, Loader2 } from "lucide-react";
+
+// Tipos internos
+interface ExtractedImage {
+  id: string;
+  page: number;
+  dataUrl: string;
+  width: number;
+  height: number;
+}
+
+interface ExtractedTextBlock {
+  id: string;
+  page: number;
+  text: string;
+}
+
+interface Metadata {
+  periodico: string;
+  titulo: string;
+  fecha: string;
+  hora: string;
+}
+
+type Stage = "form" | "processing" | "select" | "done";
+
+// Convierte un ImageData / canvas a dataURL webp
+function canvasToWebp(canvas: HTMLCanvasElement): string {
+  return canvas.toDataURL("image/webp", 0.92);
+}
+
+// Renderiza una imagen de pdfjs (con .data, .width, .height, .kind) a dataURL
+function pdfImageToDataUrl(img: {
+  data: Uint8ClampedArray | Uint8Array;
+  width: number;
+  height: number;
+  kind?: number;
+}): string | null {
+  try {
+    const { width, height, data, kind } = img;
+    if (!width || !height || !data) return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    const imageData = ctx.createImageData(width, height);
+    const dst = imageData.data;
+    // kind: 1 = grayscale (1 byte/px), 2 = RGB (3 bytes/px), 3 = RGBA (4 bytes/px)
+    if (kind === 1) {
+      for (let i = 0, j = 0; i < data.length; i++, j += 4) {
+        dst[j] = data[i];
+        dst[j + 1] = data[i];
+        dst[j + 2] = data[i];
+        dst[j + 3] = 255;
+      }
+    } else if (kind === 2 || data.length === width * height * 3) {
+      for (let i = 0, j = 0; i < data.length; i += 3, j += 4) {
+        dst[j] = data[i];
+        dst[j + 1] = data[i + 1];
+        dst[j + 2] = data[i + 2];
+        dst[j + 3] = 255;
+      }
+    } else {
+      // Asumimos RGBA
+      dst.set(data);
+    }
+    ctx.putImageData(imageData, 0, 0);
+    return canvasToWebp(canvas);
+  } catch {
+    return null;
+  }
+}
+
+export default function SocidaPressApp() {
+  const [stage, setStage] = useState<Stage>("form");
+  const [metadata, setMetadata] = useState<Metadata>({
+    periodico: "",
+    titulo: "",
+    fecha: new Date().toISOString().slice(0, 10),
+    hora: new Date().toTimeString().slice(0, 5),
+  });
+  const [file, setFile] = useState<File | null>(null);
+  const [progress, setProgress] = useState(0);
+  const [progressLabel, setProgressLabel] = useState("");
+  const [images, setImages] = useState<ExtractedImage[]>([]);
+  const [textBlocks, setTextBlocks] = useState<ExtractedTextBlock[]>([]);
+  const [selectedImgIds, setSelectedImgIds] = useState<Set<string>>(new Set());
+  const [selectedTextIds, setSelectedTextIds] = useState<Set<string>>(new Set());
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const canProcess =
+    metadata.periodico.trim() &&
+    metadata.titulo.trim() &&
+    metadata.fecha &&
+    metadata.hora &&
+    file;
+
+  const handleReset = () => {
+    setStage("form");
+    setFile(null);
+    setImages([]);
+    setTextBlocks([]);
+    setSelectedImgIds(new Set());
+    setSelectedTextIds(new Set());
+    setProgress(0);
+    setProgressLabel("");
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const processPdf = useCallback(async () => {
+    if (!file) return;
+    setStage("processing");
+    setProgress(2);
+    setProgressLabel("Cargando librerías…");
+
+    try {
+      const pdfjs = await import("pdfjs-dist");
+      const workerUrl = (await import("pdfjs-dist/build/pdf.worker.min.mjs?url"))
+        .default;
+      pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+
+      setProgressLabel("Leyendo PDF…");
+      const buf = await file.arrayBuffer();
+      const pdf = await pdfjs.getDocument({ data: buf }).promise;
+      const numPages = pdf.numPages;
+
+      const foundImages: ExtractedImage[] = [];
+      const pageCanvases: { page: number; canvas: HTMLCanvasElement }[] = [];
+
+      // 1) Render + extracción de imágenes por página
+      for (let p = 1; p <= numPages; p++) {
+        setProgressLabel(`Analizando página ${p} de ${numPages}…`);
+        setProgress(5 + Math.round(((p - 1) / numPages) * 40));
+
+        const page = await pdf.getPage(p);
+        const viewport = page.getViewport({ scale: 2 });
+        const canvas = document.createElement("canvas");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) continue;
+        await page.render({ canvasContext: ctx, viewport, canvas }).promise;
+        pageCanvases.push({ page: p, canvas });
+
+        // Extraer imágenes embebidas
+        try {
+          const opList = await page.getOperatorList();
+          const OPS = pdfjs.OPS;
+          const seen = new Set<string>();
+          for (let i = 0; i < opList.fnArray.length; i++) {
+            const fn = opList.fnArray[i];
+            if (
+              fn === OPS.paintImageXObject ||
+              fn === OPS.paintJpegXObject ||
+              fn === OPS.paintInlineImageXObject
+            ) {
+              const args = opList.argsArray[i];
+              const name = args?.[0];
+              if (!name || seen.has(name)) continue;
+              seen.add(name);
+              try {
+                const img: unknown = await new Promise((resolve) => {
+                  try {
+                    // pdfjs v6: page.objs.get admite callback
+                    (page as unknown as {
+                      objs: { get: (n: string, cb: (o: unknown) => void) => void };
+                    }).objs.get(name, resolve);
+                  } catch {
+                    resolve(null);
+                  }
+                });
+                if (img && typeof img === "object") {
+                  const typed = img as {
+                    data?: Uint8ClampedArray | Uint8Array;
+                    width?: number;
+                    height?: number;
+                    kind?: number;
+                    bitmap?: ImageBitmap;
+                  };
+                  if (typed.bitmap) {
+                    const c = document.createElement("canvas");
+                    c.width = typed.bitmap.width;
+                    c.height = typed.bitmap.height;
+                    const cx = c.getContext("2d");
+                    if (cx) {
+                      cx.drawImage(typed.bitmap, 0, 0);
+                      // Filtrar imágenes minúsculas (iconos, líneas)
+                      if (c.width >= 80 && c.height >= 80) {
+                        foundImages.push({
+                          id: `img-${p}-${foundImages.length}`,
+                          page: p,
+                          dataUrl: canvasToWebp(c),
+                          width: c.width,
+                          height: c.height,
+                        });
+                      }
+                    }
+                  } else if (typed.data && typed.width && typed.height) {
+                    if (typed.width < 80 || typed.height < 80) continue;
+                    const url = pdfImageToDataUrl({
+                      data: typed.data,
+                      width: typed.width,
+                      height: typed.height,
+                      kind: typed.kind,
+                    });
+                    if (url) {
+                      foundImages.push({
+                        id: `img-${p}-${foundImages.length}`,
+                        page: p,
+                        dataUrl: url,
+                        width: typed.width,
+                        height: typed.height,
+                      });
+                    }
+                  }
+                }
+              } catch {
+                // ignoramos imágenes que no podamos resolver
+              }
+            }
+          }
+        } catch {
+          // sin lista de operaciones -> seguimos
+        }
+      }
+
+      // 2) OCR por página
+      setProgressLabel("Preparando OCR…");
+      setProgress(48);
+      const tesseract = await import("tesseract.js");
+      const worker = await tesseract.createWorker("spa", 1, {
+        logger: (m: { status: string; progress: number }) => {
+          if (m.status === "recognizing text") {
+            // no-op individual, actualizamos por página abajo
+          }
+        },
+      });
+
+      const blocks: ExtractedTextBlock[] = [];
+      for (let idx = 0; idx < pageCanvases.length; idx++) {
+        const { page, canvas } = pageCanvases[idx];
+        setProgressLabel(`OCR página ${page} de ${numPages}…`);
+        setProgress(50 + Math.round(((idx + 1) / pageCanvases.length) * 48));
+        const { data } = await worker.recognize(canvas);
+        // Dividimos por doble salto de línea -> bloques/párrafos
+        const raw = (data.text || "").trim();
+        if (!raw) continue;
+        const chunks = raw
+          .split(/\n\s*\n+/g)
+          .map((s) => s.replace(/\s+\n/g, "\n").trim())
+          .filter((s) => s.length > 30); // descartamos fragmentos triviales
+        chunks.forEach((c, i) => {
+          blocks.push({
+            id: `txt-${page}-${i}`,
+            page,
+            text: c,
+          });
+        });
+      }
+      await worker.terminate();
+
+      setProgress(100);
+      setProgressLabel("Listo");
+      setImages(foundImages);
+      setTextBlocks(blocks);
+      // Preseleccionamos todo
+      setSelectedImgIds(new Set(foundImages.map((i) => i.id)));
+      setSelectedTextIds(new Set(blocks.map((b) => b.id)));
+
+      if (foundImages.length === 0 && blocks.length === 0) {
+        toast.warning("No se ha extraído contenido del PDF.");
+      }
+      setStage("select");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Error desconocido";
+      toast.error(`Error procesando el PDF: ${msg}`);
+      setStage("form");
+    }
+  }, [file]);
+
+  const toggleImg = (id: string) => {
+    setSelectedImgIds((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  };
+  const toggleTxt = (id: string) => {
+    setSelectedTextIds((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  };
+
+  const finalImages = useMemo(
+    () => images.filter((i) => selectedImgIds.has(i.id)),
+    [images, selectedImgIds],
+  );
+  const finalTexts = useMemo(
+    () => textBlocks.filter((b) => selectedTextIds.has(b.id)),
+    [textBlocks, selectedTextIds],
+  );
+
+  const handleFinish = () => {
+    setStage("done");
+    toast.success("Noticia guardada correctamente.");
+  };
+
+  const handleExport = () => {
+    const payload = {
+      periodico: metadata.periodico,
+      titulo: metadata.titulo,
+      fecha: metadata.fecha,
+      hora: metadata.hora,
+      texto: finalTexts.map((t) => t.text).join("\n\n"),
+      imagenes: finalImages.map((i) => ({
+        pagina: i.page,
+        ancho: i.width,
+        alto: i.height,
+        dataUrl: i.dataUrl,
+      })),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${metadata.periodico}-${metadata.titulo}`
+      .replace(/[^\w\-]+/g, "_")
+      .slice(0, 80) + ".json";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="min-h-screen bg-background">
+      <header className="border-b bg-card">
+        <div className="mx-auto flex max-w-5xl items-center gap-3 px-6 py-5">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+            <Newspaper className="h-5 w-5" />
+          </div>
+          <div>
+            <h1 className="text-xl font-bold tracking-tight">SocidaPress</h1>
+            <p className="text-xs text-muted-foreground">
+              Importa noticias en PDF, extrae imágenes y texto por OCR
+            </p>
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto max-w-5xl px-6 py-8">
+        {stage === "form" && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Nueva noticia</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="periodico">Periódico</Label>
+                  <Input
+                    id="periodico"
+                    value={metadata.periodico}
+                    onChange={(e) =>
+                      setMetadata({ ...metadata, periodico: e.target.value })
+                    }
+                    placeholder="Ej. El País"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="titulo">Título de la noticia</Label>
+                  <Input
+                    id="titulo"
+                    value={metadata.titulo}
+                    onChange={(e) =>
+                      setMetadata({ ...metadata, titulo: e.target.value })
+                    }
+                    placeholder="Titular"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="fecha">Fecha</Label>
+                  <Input
+                    id="fecha"
+                    type="date"
+                    value={metadata.fecha}
+                    onChange={(e) =>
+                      setMetadata({ ...metadata, fecha: e.target.value })
+                    }
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="hora">Hora</Label>
+                  <Input
+                    id="hora"
+                    type="time"
+                    value={metadata.hora}
+                    onChange={(e) =>
+                      setMetadata({ ...metadata, hora: e.target.value })
+                    }
+                  />
+                </div>
+              </div>
+
+              <Separator />
+
+              <div className="space-y-2">
+                <Label htmlFor="pdf">Archivo PDF de la noticia</Label>
+                <div className="flex items-center gap-3">
+                  <Input
+                    id="pdf"
+                    ref={fileInputRef}
+                    type="file"
+                    accept="application/pdf"
+                    onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                  />
+                </div>
+                {file && (
+                  <p className="text-xs text-muted-foreground">
+                    Seleccionado: {file.name} (
+                    {(file.size / 1024 / 1024).toFixed(2)} MB)
+                  </p>
+                )}
+              </div>
+
+              <div className="flex justify-end">
+                <Button
+                  onClick={processPdf}
+                  disabled={!canProcess}
+                  size="lg"
+                  className="gap-2"
+                >
+                  <FileUp className="h-4 w-4" />
+                  Procesar PDF
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {stage === "processing" && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Loader2 className="h-5 w-5 animate-spin" />
+                Procesando…
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <Progress value={progress} />
+              <p className="text-sm text-muted-foreground">{progressLabel}</p>
+              <p className="text-xs text-muted-foreground">
+                El OCR puede tardar varios segundos por página.
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
+        {stage === "select" && (
+          <div className="space-y-8">
+            <Card>
+              <CardHeader>
+                <CardTitle>Imágenes detectadas ({images.length})</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {images.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    No se han encontrado imágenes embebidas en el PDF.
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
+                    {images.map((img) => {
+                      const selected = selectedImgIds.has(img.id);
+                      return (
+                        <button
+                          type="button"
+                          key={img.id}
+                          onClick={() => toggleImg(img.id)}
+                          className={`group relative overflow-hidden rounded-lg border-2 transition ${
+                            selected
+                              ? "border-primary ring-2 ring-primary/30"
+                              : "border-border opacity-70 hover:opacity-100"
+                          }`}
+                        >
+                          <img
+                            src={img.dataUrl}
+                            alt={`Imagen página ${img.page}`}
+                            loading="lazy"
+                            className="h-40 w-full object-cover"
+                          />
+                          <div className="absolute left-2 top-2">
+                            <Checkbox checked={selected} />
+                          </div>
+                          <div className="absolute bottom-0 left-0 right-0 bg-black/60 px-2 py-1 text-left text-xs text-white">
+                            Pág. {img.page} · {img.width}×{img.height}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>
+                  Bloques de texto detectados ({textBlocks.length})
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {textBlocks.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    No se ha extraído texto por OCR.
+                  </p>
+                ) : (
+                  textBlocks.map((b) => {
+                    const selected = selectedTextIds.has(b.id);
+                    return (
+                      <label
+                        key={b.id}
+                        className={`flex cursor-pointer gap-3 rounded-lg border-2 p-3 transition ${
+                          selected
+                            ? "border-primary bg-primary/5"
+                            : "border-border opacity-70 hover:opacity-100"
+                        }`}
+                      >
+                        <Checkbox
+                          checked={selected}
+                          onCheckedChange={() => toggleTxt(b.id)}
+                          className="mt-1"
+                        />
+                        <div className="flex-1 space-y-1">
+                          <p className="text-xs font-medium text-muted-foreground">
+                            Página {b.page}
+                          </p>
+                          <Textarea
+                            value={b.text}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setTextBlocks((prev) =>
+                                prev.map((x) =>
+                                  x.id === b.id ? { ...x, text: v } : x,
+                                ),
+                              );
+                            }}
+                            className="min-h-24 text-sm"
+                          />
+                        </div>
+                      </label>
+                    );
+                  })
+                )}
+              </CardContent>
+            </Card>
+
+            <div className="flex justify-between">
+              <Button variant="outline" onClick={handleReset} className="gap-2">
+                <RotateCcw className="h-4 w-4" />
+                Empezar de nuevo
+              </Button>
+              <Button onClick={handleFinish} size="lg">
+                Guardar noticia
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {stage === "done" && (
+          <Card>
+            <CardHeader>
+              <CardTitle>{metadata.titulo}</CardTitle>
+              <p className="text-sm text-muted-foreground">
+                {metadata.periodico} · {metadata.fecha} · {metadata.hora}
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {finalImages.length > 0 && (
+                <div>
+                  <h3 className="mb-3 text-sm font-semibold">
+                    Imágenes conservadas ({finalImages.length})
+                  </h3>
+                  <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+                    {finalImages.map((img) => (
+                      <img
+                        key={img.id}
+                        src={img.dataUrl}
+                        alt=""
+                        loading="lazy"
+                        className="rounded-md border object-cover"
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+              {finalTexts.length > 0 && (
+                <div>
+                  <h3 className="mb-3 text-sm font-semibold">Texto</h3>
+                  <div className="space-y-3 rounded-md border bg-muted/30 p-4">
+                    {finalTexts.map((t) => (
+                      <p key={t.id} className="whitespace-pre-wrap text-sm">
+                        {t.text}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="flex justify-between">
+                <Button variant="outline" onClick={handleReset} className="gap-2">
+                  <RotateCcw className="h-4 w-4" />
+                  Nueva noticia
+                </Button>
+                <Button onClick={handleExport} className="gap-2">
+                  <Download className="h-4 w-4" />
+                  Descargar JSON
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+      </main>
+    </div>
+  );
+}
