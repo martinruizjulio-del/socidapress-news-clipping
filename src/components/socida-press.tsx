@@ -332,38 +332,75 @@ function extraerBloquesNativos(
     .filter((l) => l.text.length > 0);
 
 
-  // 2) Identificar titulares (líneas con fuente notablemente mayor que la
-  //    mediana del cuerpo). Se exigen al menos dos palabras y 8 caracteres
-  //    para evitar confundir pull-quotes, capitulares o etiquetas cortas.
+  // 2) Identificar titulares principales (fuente muy grande) y "decks"
+  //    o subtítulos (fuente intermedia). Después agrupamos cada titular
+  //    con las líneas grandes/intermedias contiguas por debajo, para que
+  //    títulos multilínea y subtítulos formen un único bloque.
   const esHeadline = (l: Linea) =>
     l.size >= median * 1.8 &&
     l.text.length >= 8 &&
     l.text.length < 200 &&
     l.text.split(/\s+/).length >= 2 &&
-    l.text.split(/\s+/).length <= 20 &&
+    l.text.split(/\s+/).length <= 25 &&
     !esLineaRuido(l.text) &&
     !esEtiquetaSeccion(l.text);
 
+  const esSubtitular = (l: Linea) =>
+    l.size >= median * 1.3 &&
+    l.size < median * 1.8 &&
+    l.text.length >= 15 &&
+    !esLineaRuido(l.text);
 
-  const headlineLines = limpias.filter(esHeadline).sort((a, b) => b.y - a.y);
+  const porYDesc = (a: Linea, b: Linea) => b.y - a.y;
 
-  // Titulares consecutivos (misma noticia con antetítulo/subtítulo/titular
-  // en varias líneas) se fusionan en un único artículo.
-  type Articulo = { headlineY: number; headlineSize: number; titulo: string };
+  // Semillas: titulares principales ordenados de arriba abajo.
+  const semillas = limpias.filter(esHeadline).sort(porYDesc);
+
+  type Articulo = { headlineTop: number; headlineBottom: number; titulo: string };
   const articulos: Articulo[] = [];
-  for (const h of headlineLines) {
-    const last = articulos[articulos.length - 1];
-    if (
-      last &&
-      Math.abs(last.headlineY - h.y) < median * 3.5 &&
-      Math.abs(last.headlineSize - h.size) < h.size * 0.4
-    ) {
-      last.titulo = `${last.titulo} ${h.text}`.trim();
-      last.headlineY = Math.min(last.headlineY, h.y);
-    } else {
-      articulos.push({ headlineY: h.y, headlineSize: h.size, titulo: h.text });
+
+  // Ampliamos cada semilla con las líneas cercanas por debajo cuyo tamaño
+  // sea igual (títulos multilínea) o intermedio (deck/subtítulo). Nos
+  // detenemos al llegar a texto de cuerpo o a otro titular principal.
+  const consumidas = new Set<Linea>();
+  for (const seed of semillas) {
+    if (consumidas.has(seed)) continue;
+    const cluster: Linea[] = [seed];
+    consumidas.add(seed);
+    // Candidatas por debajo del titular, ordenadas de arriba abajo.
+    const debajo = limpias
+      .filter((l) => !consumidas.has(l) && l.y < seed.y)
+      .sort(porYDesc);
+    let yRef = seed.y;
+    for (const l of debajo) {
+      const gap = yRef - l.y;
+      if (gap > Math.max(seed.size, l.size) * 2.5) break;
+      // Nueva semilla principal a la vista: paramos, no la absorbemos.
+      if (esHeadline(l) && Math.abs(l.size - seed.size) > seed.size * 0.15) break;
+      const mismaFuente = Math.abs(l.size - seed.size) <= seed.size * 0.15;
+      if (mismaFuente || esSubtitular(l)) {
+        cluster.push(l);
+        consumidas.add(l);
+        yRef = l.y;
+        continue;
+      }
+      // Línea a tamaño de cuerpo: fin del bloque de titular.
+      break;
     }
+    const top = Math.max(...cluster.map((l) => l.y));
+    const bottom = Math.min(...cluster.map((l) => l.y));
+    const titulo = cluster
+      .sort(porYDesc)
+      .map((l) => l.text)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    articulos.push({ headlineTop: top, headlineBottom: bottom, titulo });
   }
+
+  articulos.sort((a, b) => b.headlineTop - a.headlineTop);
+
+
 
   // Si no hay titulares detectados, tratamos toda la página como un bloque
   // (por ejemplo páginas con solo cuerpo). Se conservan las líneas ordenadas.
