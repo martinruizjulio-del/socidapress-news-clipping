@@ -713,7 +713,19 @@ export default function SocidaPressApp() {
               hasEOL: !!it.hasEOL,
             };
           });
-          nativePageItems.push({ page: p, items: nItems });
+          // Si hay zona marcada para esta página, nos quedamos sólo con los
+          // items cuyo origen cae dentro del rectángulo definido por el usuario.
+          const rectPdf = regions[p];
+          const nItemsFiltrados = rectPdf
+            ? nItems.filter(
+                (it) =>
+                  it.x >= rectPdf.xMin &&
+                  it.x <= rectPdf.xMax &&
+                  it.y >= rectPdf.yMin &&
+                  it.y <= rectPdf.yMax,
+              )
+            : nItems;
+          nativePageItems.push({ page: p, items: nItemsFiltrados });
 
 
 
