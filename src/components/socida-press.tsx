@@ -22,6 +22,7 @@ interface ExtractedImage {
 interface ExtractedTextBlock {
   id: string;
   page: number;
+  titulo?: string;
   text: string;
 }
 
