@@ -882,10 +882,23 @@ export default function SocidaPressApp() {
                           onCheckedChange={() => toggleTxt(b.id)}
                           className="mt-1"
                         />
-                        <div className="flex-1 space-y-1">
+                        <div className="flex-1 space-y-2">
                           <p className="text-xs font-medium text-muted-foreground">
                             Página {b.page}
                           </p>
+                          <Input
+                            value={b.titulo ?? ""}
+                            placeholder="Subtítulo del bloque (opcional)"
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setTextBlocks((prev) =>
+                                prev.map((x) =>
+                                  x.id === b.id ? { ...x, titulo: v } : x,
+                                ),
+                              );
+                            }}
+                            className="font-semibold"
+                          />
                           <Textarea
                             value={b.text}
                             onChange={(e) => {
