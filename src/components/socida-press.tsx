@@ -36,7 +36,21 @@ interface Metadata {
   hora: string;
 }
 
-type Stage = "form" | "processing" | "select" | "done";
+type Stage = "form" | "region" | "processing" | "select" | "done";
+
+// Rectángulo de recorte en coordenadas de usuario del PDF (mismo espacio que
+// los items de texto nativos y el viewBox de pdfjs).
+type PdfRect = { xMin: number; xMax: number; yMin: number; yMax: number };
+
+// Miniatura de página + info de viewport necesaria para mapear coordenadas
+// pantalla <-> PDF y aplicar el recorte durante el procesado.
+interface PageThumb {
+  page: number;
+  dataUrl: string;
+  canvasWidth: number;
+  canvasHeight: number;
+  viewBox: [number, number, number, number];
+}
 
 // Convierte un ImageData / canvas a dataURL webp
 function canvasToWebp(canvas: HTMLCanvasElement): string {
