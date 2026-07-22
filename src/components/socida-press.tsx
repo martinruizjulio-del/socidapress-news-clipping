@@ -304,15 +304,23 @@ function extraerBloquesNativos(
 
   const limpias = lineas
     .map((l) => ({ ...l, text: l.text.replace(/\s+/g, " ").trim() }))
-    .filter((l) => l.text.length > 0);
+    .filter((l) => l.text.length > 0)
+    // Descarta letras capitulares (drop caps): un solo carácter con
+    // tamaño enorme respecto al cuerpo del texto.
+    .filter((l) => !(l.text.length <= 2 && l.size >= median * 2.5));
 
   // 2) Identificar titulares (líneas con fuente notablemente mayor que la
-  //    mediana del cuerpo). Cada titular abre una nueva noticia.
+  //    mediana del cuerpo). Se exigen al menos dos palabras y 8 caracteres
+  //    para evitar confundir pull-quotes, capitulares o etiquetas cortas.
   const esHeadline = (l: Linea) =>
-    l.size >= median * 1.6 &&
+    l.size >= median * 1.8 &&
+    l.text.length >= 8 &&
     l.text.length < 200 &&
+    l.text.split(/\s+/).length >= 2 &&
     l.text.split(/\s+/).length <= 20 &&
-    !/^\d+$/.test(l.text);
+    !esLineaRuido(l.text) &&
+    !esEtiquetaSeccion(l.text);
+
 
   const headlineLines = limpias.filter(esHeadline).sort((a, b) => b.y - a.y);
 
