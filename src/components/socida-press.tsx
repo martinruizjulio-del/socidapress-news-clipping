@@ -87,37 +87,38 @@ const MESES: Record<string, string> = {
   noviembre: "11", diciembre: "12",
 };
 
-// Intenta extraer periódico, título, fecha y hora del texto OCR
-function extraerMetadatos(pages: { page: number; text: string }[]): Metadata {
-  const md: Metadata = { periodico: "", titulo: "", fecha: "", hora: "" };
-  const firstPage = pages[0]?.text ?? "";
-  const fullText = pages.map((p) => p.text).join("\n");
+// Periódicos permitidos (orden por prioridad de detección: primero los que no
+// generan falsos positivos; "AS" al final por ser una palabra muy corta).
+const PERIODICOS_CONOCIDOS = ["Superdeporte", "Marca", "Sport", "AS"] as const;
 
-  // Líneas útiles de la primera página
-  const lines = firstPage
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-
-  // Periódico: primera línea corta razonable (habitualmente la cabecera)
-  const cabecera = lines.find(
-    (l) => l.length >= 3 && l.length <= 40 && /[A-Za-zÁÉÍÓÚÑáéíóúñ]/.test(l),
-  );
-  if (cabecera) md.periodico = cabecera.replace(/\s+/g, " ");
-
-  // Título: línea más larga entre las primeras 15, con longitud razonable
-  const candidatas = lines.slice(0, 15).filter(
-    (l) => l.length >= 15 && l.length <= 180 && !/^\d+$/.test(l),
-  );
-  if (candidatas.length) {
-    candidatas.sort((a, b) => b.length - a.length);
-    // Evitamos coger la cabecera como título
-    const titulo = candidatas.find((l) => l !== cabecera) ?? candidatas[0];
-    md.titulo = titulo;
+// Detecta el periódico buscando su nombre en el texto completo de la página.
+// Prioriza coincidencias con "DIARIO <X>" y exige límites de palabra.
+function detectarPeriodico(fullText: string): string {
+  const t = fullText;
+  for (const nombre of PERIODICOS_CONOCIDOS) {
+    const reDiario = new RegExp(`DIARIO\\s+${nombre}`, "i");
+    if (reDiario.test(t)) return nombre;
   }
+  for (const nombre of PERIODICOS_CONOCIDOS) {
+    // Límite razonable: no debe formar parte de otra palabra
+    const re = new RegExp(`(^|[^A-Za-zÁÉÍÓÚÑ])${nombre}([^A-Za-zÁÉÍÓÚÑ]|$)`, "i");
+    if (re.test(t)) return nombre;
+  }
+  return "";
+}
 
-  // Fecha: varios formatos
-  // dd/mm/yyyy o dd-mm-yyyy
+// Intenta extraer periódico, título, fecha y hora del texto de la página.
+// `titleFromFont` es el título detectado por tamaño de fuente (más fiable).
+function extraerMetadatos(
+  fullText: string,
+  titleFromFont: string,
+): Metadata {
+  const md: Metadata = { periodico: "", titulo: "", fecha: "", hora: "" };
+
+  md.periodico = detectarPeriodico(fullText);
+  md.titulo = titleFromFont.trim();
+
+  // Fecha: dd/mm/yyyy o dd-mm-yyyy
   const mNum = fullText.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/);
   if (mNum) {
     const d = mNum[1].padStart(2, "0");
@@ -149,6 +150,33 @@ function extraerMetadatos(pages: { page: number; text: string }[]): Metadata {
 
   return md;
 }
+
+// Heurística para descartar bloques que son maquetación en lugar de cuerpo:
+// firmas ("AS / MADRID", "PEPE ANDRES / DIARIO AS"), cabeceras de sección
+// ("Baloncesto", "hípica"), páginas ("DM6"), etiquetas en mayúsculas,
+// pies de foto muy cortos, etc.
+function esRuidoMaquetacion(texto: string): boolean {
+  const s = texto.trim();
+  if (!s) return true;
+  if (s.length < 60) return true; // fragmentos cortos: cabeceras, pies, folios
+  const primeraLinea = s.split(/\r?\n/)[0].trim();
+  // Firmas tipo "NOMBRE APELLIDO / CIUDAD" o "AS / MADRID"
+  if (/^[A-ZÁÉÍÓÚÑ0-9 .·-]{2,}\s*\/\s*[A-ZÁÉÍÓÚÑ0-9 .·-]{2,}\s*$/.test(primeraLinea)) {
+    return true;
+  }
+  // Todo el bloque en mayúsculas -> titular o antetítulo de maquetación
+  const letras = s.replace(/[^A-Za-zÁÉÍÓÚÑáéíóúñ]/g, "");
+  if (letras.length > 0) {
+    const mays = letras.replace(/[^A-ZÁÉÍÓÚÑ]/g, "").length;
+    if (mays / letras.length > 0.85) return true;
+  }
+  // Menciones a los periódicos como créditos ("DIARIO AS", "MARCA / MADRID")
+  if (/DIARIO\s+(AS|MARCA|SPORT|SUPERDEPORTE)/i.test(s) && s.length < 120) {
+    return true;
+  }
+  return false;
+}
+
 
 export default function SocidaPressApp() {
   const [stage, setStage] = useState<Stage>("form");
@@ -199,6 +227,9 @@ export default function SocidaPressApp() {
 
       const foundImages: ExtractedImage[] = [];
       const pageCanvases: { page: number; canvas: HTMLCanvasElement }[] = [];
+      const nativePageTexts: { page: number; text: string }[] = [];
+      let tituloDetectado = "";
+
 
       // 1) Render + extracción de imágenes por página
       for (let p = 1; p <= numPages; p++) {
@@ -214,6 +245,41 @@ export default function SocidaPressApp() {
         if (!ctx) continue;
         await page.render({ canvasContext: ctx, viewport, canvas }).promise;
         pageCanvases.push({ page: p, canvas });
+
+        // Extraer texto nativo del PDF (mucho más fiable que OCR para
+        // detectar cabecera, fecha y título por tamaño de fuente).
+        try {
+          const tc = await page.getTextContent();
+          type TItem = { str: string; height?: number; transform?: number[]; hasEOL?: boolean };
+          const items = (tc.items as unknown[]).filter(
+            (it): it is TItem => !!it && typeof (it as TItem).str === "string",
+          );
+          const pageStr = items
+            .map((it) => it.str + (it.hasEOL ? "\n" : " "))
+            .join("")
+            .replace(/[ \t]+\n/g, "\n")
+            .trim();
+          nativePageTexts.push({ page: p, text: pageStr });
+
+          if (p === 1) {
+            // Título: buscamos los items con mayor altura de fuente
+            const withSize = items
+              .map((it) => ({
+                str: it.str.trim(),
+                size: it.height ?? (it.transform ? Math.abs(it.transform[3]) : 0),
+              }))
+              .filter((x) => x.str.length > 0);
+            if (withSize.length) {
+              const maxSize = withSize.reduce((m, x) => Math.max(m, x.size), 0);
+              const umbral = maxSize * 0.9;
+              const tituloItems = withSize.filter((x) => x.size >= umbral);
+              tituloDetectado = tituloItems.map((x) => x.str).join(" ").replace(/\s+/g, " ").trim();
+            }
+          }
+        } catch {
+          // sin capa de texto -> nos apoyaremos en el OCR
+        }
+
 
         try {
           const opList = await page.getOperatorList();
@@ -312,19 +378,27 @@ export default function SocidaPressApp() {
         const chunks = raw
           .split(/\n\s*\n+/g)
           .map((s) => s.replace(/\s+\n/g, "\n").trim())
-          .filter((s) => s.length > 30);
+          // Filtramos elementos de maquetación: firmas, cabeceras, pies…
+          .filter((s) => !esRuidoMaquetacion(s));
         chunks.forEach((c, i) => {
           blocks.push({ id: `txt-${page}-${i}`, page, text: c });
         });
       }
       await worker.terminate();
 
-      // 3) Extraer metadatos a partir del OCR
-      const meta = extraerMetadatos(pagesText);
+      // 3) Extraer metadatos combinando texto nativo del PDF (más fiable)
+      //    y, si no hubiera capa de texto, el resultado del OCR.
+      const nativeFull = nativePageTexts.map((p) => p.text).join("\n");
+      const ocrFull = pagesText.map((p) => p.text).join("\n");
+      const meta = extraerMetadatos(
+        `${nativeFull}\n${ocrFull}`,
+        tituloDetectado,
+      );
       // Fallback: si no encontramos fecha/hora, usamos las actuales
       if (!meta.fecha) meta.fecha = new Date().toISOString().slice(0, 10);
       if (!meta.hora) meta.hora = new Date().toTimeString().slice(0, 5);
       setMetadata(meta);
+
 
       setProgress(100);
       setProgressLabel("Listo");
