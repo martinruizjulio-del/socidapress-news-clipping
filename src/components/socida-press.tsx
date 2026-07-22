@@ -378,19 +378,27 @@ export default function SocidaPressApp() {
         const chunks = raw
           .split(/\n\s*\n+/g)
           .map((s) => s.replace(/\s+\n/g, "\n").trim())
-          .filter((s) => s.length > 30);
+          // Filtramos elementos de maquetación: firmas, cabeceras, pies…
+          .filter((s) => !esRuidoMaquetacion(s));
         chunks.forEach((c, i) => {
           blocks.push({ id: `txt-${page}-${i}`, page, text: c });
         });
       }
       await worker.terminate();
 
-      // 3) Extraer metadatos a partir del OCR
-      const meta = extraerMetadatos(pagesText);
+      // 3) Extraer metadatos combinando texto nativo del PDF (más fiable)
+      //    y, si no hubiera capa de texto, el resultado del OCR.
+      const nativeFull = nativePageTexts.map((p) => p.text).join("\n");
+      const ocrFull = pagesText.map((p) => p.text).join("\n");
+      const meta = extraerMetadatos(
+        `${nativeFull}\n${ocrFull}`,
+        tituloDetectado,
+      );
       // Fallback: si no encontramos fecha/hora, usamos las actuales
       if (!meta.fecha) meta.fecha = new Date().toISOString().slice(0, 10);
       if (!meta.hora) meta.hora = new Date().toTimeString().slice(0, 5);
       setMetadata(meta);
+
 
       setProgress(100);
       setProgressLabel("Listo");
