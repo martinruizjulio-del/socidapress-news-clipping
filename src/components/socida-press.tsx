@@ -939,7 +939,7 @@ export default function SocidaPressApp() {
       toast.error(`Error procesando el PDF: ${msg}`);
       setStage("form");
     }
-  }, [file]);
+  }, [file, regions]);
 
   const toggleImg = (id: string) => {
     setSelectedImgIds((prev) => {
