@@ -162,7 +162,6 @@ export default function SocidaPressApp() {
             const fn = opList.fnArray[i];
             if (
               fn === OPS.paintImageXObject ||
-              fn === OPS.paintJpegXObject ||
               fn === OPS.paintInlineImageXObject
             ) {
               const args = opList.argsArray[i];
