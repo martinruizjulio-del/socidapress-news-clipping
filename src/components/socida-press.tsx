@@ -476,7 +476,10 @@ export function extraerBloquesNativos(
       return b.y - a.y;
     });
     const raw = lineasCuerpo.map((l) => l.text).join("\n");
+    document.title = `DBG raw art${i}: ${raw.slice(0, 250)}`;
     const limpio = limpiarTexto(raw);
+    document.title = `DBG lim art${i}: ${limpio.slice(0, 250)}`;
+
     if (limpio.length < 40 || esRuidoMaquetacion(limpio)) continue;
     const meta = extraerMetadatos(`${limpio}\n${art.titulo}`, "");
     bloques.push({
