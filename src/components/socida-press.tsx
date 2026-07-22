@@ -227,6 +227,9 @@ export default function SocidaPressApp() {
 
       const foundImages: ExtractedImage[] = [];
       const pageCanvases: { page: number; canvas: HTMLCanvasElement }[] = [];
+      const nativePageTexts: { page: number; text: string }[] = [];
+      let tituloDetectado = "";
+
 
       // 1) Render + extracción de imágenes por página
       for (let p = 1; p <= numPages; p++) {
