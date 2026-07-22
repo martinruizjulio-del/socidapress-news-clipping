@@ -181,15 +181,49 @@ function esRuidoMaquetacion(texto: string): boolean {
   return false;
 }
 
+// Filtros a nivel de línea: firmas, folios, cabeceras de sección,
+// créditos fotográficos y letras capitulares que la maquetación coloca
+// como items independientes en el PDF y contaminarían el cuerpo.
+function esLineaRuido(texto: string): boolean {
+  const s = texto.trim();
+  if (!s) return true;
+  // Folio de página tipo "DM6", "AS12", "M3"
+  if (/^[A-Z]{1,3}\s?\d{1,4}$/.test(s)) return true;
+  // Firma de autor: "NOMBRE APELLIDO / CIUDAD" o "AS / MADRID"
+  if (/^[A-ZÁÉÍÓÚÑ0-9.·\- ]{2,}\s*\/\s*[A-ZÁÉÍÓÚÑ0-9.·\- ]{2,}$/.test(s)) return true;
+  // Créditos fotográficos: "PEPE ANDRES / DIARIO AS", "COMUNIDAD DE MADRID"
+  if (/DIARIO\s+(AS|MARCA|SPORT|SUPERDEPORTE)/i.test(s) && s.length < 60) return true;
+  // Todo en mayúsculas y corto -> antetítulo/kicker/sección
+  const letras = s.replace(/[^A-Za-zÁÉÍÓÚÑáéíóúñ]/g, "");
+  if (letras.length >= 2) {
+    const mays = letras.replace(/[^A-ZÁÉÍÓÚÑ]/g, "").length;
+    if (mays / letras.length > 0.85 && s.length < 80) return true;
+  }
+  return false;
+}
+
+// Nombre de sección corto ("Baloncesto", "hípica", "Madrid") sin puntuación.
+function esEtiquetaSeccion(texto: string): boolean {
+  const s = texto.trim();
+  if (s.length > 30) return false;
+  if (!/^[A-Za-zÁÉÍÓÚÑñáéíóú ]+$/.test(s)) return false;
+  return s.split(/\s+/).length <= 3;
+}
+
+
 // Limpia texto (OCR o nativo) eliminando caracteres extraños,
 // símbolos sueltos, guiones de fin de línea y espacios repetidos.
 function limpiarTexto(texto: string): string {
   let s = texto;
-  // Normaliza a NFC y elimina caracteres de control invisibles
-  s = s.normalize("NFC");
+  // Elimina caracteres de control invisibles
   s = s.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, "");
   // Elimina reemplazos, guiones opcionales y marcas de dirección
   s = s.replace(/[\uFFFD\u00AD\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g, "");
+  // Une marcas combinantes con la letra anterior aunque pdf.js las emita
+  // separadas por un espacio (ej. "n \u0303" -> "ñ" tras NFC).
+  s = s.replace(/(\p{L})\s+(\p{M})/gu, "$1$2");
+  // Ahora sí normaliza a NFC para componer letra + diacrítico -> ñ, á, é...
+  s = s.normalize("NFC");
   // Comillas tipográficas y guiones largos -> ASCII
   s = s.replace(/[“”«»„]/g, '"').replace(/[‘’‚‛]/g, "'").replace(/[–—―]/g, "-");
   // Puntos suspensivos tipográficos
@@ -198,8 +232,9 @@ function limpiarTexto(texto: string): string {
   s = s.replace(/(\p{L})-\s*\n\s*(\p{Ll})/gu, "$1$2");
   // Une saltos de línea internos de un mismo párrafo (no dobles)
   s = s.replace(/([^\n])\n(?!\n)/g, "$1 ");
-  // Solo letras (con acentos), dígitos, puntuación habitual y espacios
-  s = s.replace(/[^\p{L}\p{N}\s.,;:!¡¿?()"'%€$£ºª&/\-\n]/gu, " ");
+  // Whitelist ampliada: incluye marcas combinantes por si quedara alguna.
+  s = s.replace(/[^\p{L}\p{M}\p{N}\s.,;:!¡¿?()"'%€$£ºª&/\-\n]/gu, " ");
+
   // Colapsa espacios
   s = s.replace(/[ \t]{2,}/g, " ");
   s = s.replace(/\s+([.,;:!?])/g, "$1");
@@ -218,7 +253,15 @@ function limpiarTexto(texto: string): string {
     })
     .join("\n");
   // Palabras de una sola letra sueltas (excepto a, o, y, e, u)
-  s = s.replace(/\b(?![aAoOyYeEuU]\b)[a-záéíóúñ]\b/g, "").replace(/[ \t]{2,}/g, " ");
+  // Palabras de una sola letra sueltas (excepto a, o, y, e, u). Usamos
+  // lookarounds Unicode porque \b en JS ignora los acentos y borraría
+  // ñ/á/é interiores de palabras como "años" o "después".
+  s = s
+    .replace(
+      /(?<![\p{L}\p{N}_])(?![aAoOyYeEuUiI](?![\p{L}\p{N}_]))[\p{L}](?![\p{L}\p{N}_])/gu,
+      "",
+    )
+    .replace(/[ \t]{2,}/g, " ");
   return s.trim();
 }
 
@@ -272,37 +315,100 @@ function extraerBloquesNativos(
     }
   }
 
+  // Detecta letras capitulares (drop caps): un solo carácter con tamaño
+  // enorme. Antes de descartarlas, las fusionamos con la línea contigua
+  // a su derecha para no perder la primera letra del cuerpo ("D" + "el 19…").
+  const capitulares = lineas.filter(
+    (l) => l.text.trim().length <= 2 && l.size >= median * 2.5,
+  );
+  const capSet = new Set(capitulares);
+  for (const dc of capitulares) {
+    const letra = dc.text.trim();
+    const destino = lineas.find(
+      (l) =>
+        !capSet.has(l) &&
+        l.x >= dc.x - 5 &&
+        l.x <= dc.xEnd + dc.size * 2 &&
+        Math.abs(l.y - dc.y) < dc.size,
+    );
+    if (destino) destino.text = letra + destino.text;
+  }
+
   const limpias = lineas
+    .filter((l) => !capSet.has(l))
     .map((l) => ({ ...l, text: l.text.replace(/\s+/g, " ").trim() }))
     .filter((l) => l.text.length > 0);
 
-  // 2) Identificar titulares (líneas con fuente notablemente mayor que la
-  //    mediana del cuerpo). Cada titular abre una nueva noticia.
+
+  // 2) Identificar titulares principales (fuente muy grande) y "decks"
+  //    o subtítulos (fuente intermedia). Después agrupamos cada titular
+  //    con las líneas grandes/intermedias contiguas por debajo, para que
+  //    títulos multilínea y subtítulos formen un único bloque.
   const esHeadline = (l: Linea) =>
-    l.size >= median * 1.6 &&
+    l.size >= median * 1.8 &&
+    l.text.length >= 8 &&
     l.text.length < 200 &&
-    l.text.split(/\s+/).length <= 20 &&
-    !/^\d+$/.test(l.text);
+    l.text.split(/\s+/).length >= 2 &&
+    l.text.split(/\s+/).length <= 25 &&
+    !esLineaRuido(l.text) &&
+    !esEtiquetaSeccion(l.text);
 
-  const headlineLines = limpias.filter(esHeadline).sort((a, b) => b.y - a.y);
+  const esSubtitular = (l: Linea) =>
+    l.size >= median * 1.3 &&
+    l.size < median * 1.8 &&
+    l.text.length >= 15 &&
+    !esLineaRuido(l.text);
 
-  // Titulares consecutivos (misma noticia con antetítulo/subtítulo/titular
-  // en varias líneas) se fusionan en un único artículo.
-  type Articulo = { headlineY: number; headlineSize: number; titulo: string };
+  const porYDesc = (a: Linea, b: Linea) => b.y - a.y;
+
+  // Semillas: titulares principales ordenados de arriba abajo.
+  const semillas = limpias.filter(esHeadline).sort(porYDesc);
+
+  type Articulo = { headlineTop: number; headlineBottom: number; titulo: string };
   const articulos: Articulo[] = [];
-  for (const h of headlineLines) {
-    const last = articulos[articulos.length - 1];
-    if (
-      last &&
-      Math.abs(last.headlineY - h.y) < median * 3.5 &&
-      Math.abs(last.headlineSize - h.size) < h.size * 0.4
-    ) {
-      last.titulo = `${last.titulo} ${h.text}`.trim();
-      last.headlineY = Math.min(last.headlineY, h.y);
-    } else {
-      articulos.push({ headlineY: h.y, headlineSize: h.size, titulo: h.text });
+
+  // Ampliamos cada semilla con las líneas cercanas por debajo cuyo tamaño
+  // sea igual (títulos multilínea) o intermedio (deck/subtítulo). Nos
+  // detenemos al llegar a texto de cuerpo o a otro titular principal.
+  const consumidas = new Set<Linea>();
+  for (const seed of semillas) {
+    if (consumidas.has(seed)) continue;
+    const cluster: Linea[] = [seed];
+    consumidas.add(seed);
+    // Candidatas por debajo del titular, ordenadas de arriba abajo.
+    const debajo = limpias
+      .filter((l) => !consumidas.has(l) && l.y < seed.y)
+      .sort(porYDesc);
+    let yRef = seed.y;
+    for (const l of debajo) {
+      const gap = yRef - l.y;
+      if (gap > Math.max(seed.size, l.size) * 2.5) break;
+      // Nueva semilla principal a la vista: paramos, no la absorbemos.
+      if (esHeadline(l) && Math.abs(l.size - seed.size) > seed.size * 0.15) break;
+      const mismaFuente = Math.abs(l.size - seed.size) <= seed.size * 0.15;
+      if (mismaFuente || esSubtitular(l)) {
+        cluster.push(l);
+        consumidas.add(l);
+        yRef = l.y;
+        continue;
+      }
+      // Línea a tamaño de cuerpo: fin del bloque de titular.
+      break;
     }
+    const top = Math.max(...cluster.map((l) => l.y));
+    const bottom = Math.min(...cluster.map((l) => l.y));
+    const titulo = cluster
+      .sort(porYDesc)
+      .map((l) => l.text)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    articulos.push({ headlineTop: top, headlineBottom: bottom, titulo });
   }
+
+  articulos.sort((a, b) => b.headlineTop - a.headlineTop);
+
+
 
   // Si no hay titulares detectados, tratamos toda la página como un bloque
   // (por ejemplo páginas con solo cuerpo). Se conservan las líneas ordenadas.
@@ -325,11 +431,22 @@ function extraerBloquesNativos(
   const cuerpos: Linea[][] = articulos.map(() => []);
   const sueltas: Linea[] = [];
   for (const l of limpias) {
+    if (consumidas.has(l)) continue; // ya forma parte de un titular/deck
     if (esHeadline(l)) continue;
+    // Ignora líneas que son ruido de maquetación (firmas, folios, créditos,
+    // antetítulos en mayúsculas, etiquetas de sección) para que no
+    // contaminen el cuerpo de la noticia.
+    if (esLineaRuido(l.text)) continue;
+    if (esEtiquetaSeccion(l.text) && l.size <= median * 1.3) continue;
+    // Pull-quotes: líneas con fuente medianamente grande pero cortas y
+    // aisladas en su propia columna estrecha suelen ser destacados;
+    // los omitimos porque duplican texto del propio cuerpo.
+    if (l.size >= median * 1.25 && l.size < median * 1.8 && l.text.length < 60) continue;
+
     let mejor = -1;
     let mejorDy = Infinity;
     for (let i = 0; i < articulos.length; i++) {
-      const hy = articulos[i].headlineY;
+      const hy = articulos[i].headlineBottom;
       // La línea de cuerpo debe estar por debajo (o casi) del titular.
       if (hy >= l.y - median * 0.5) {
         const dy = hy - l.y;
@@ -342,6 +459,7 @@ function extraerBloquesNativos(
     if (mejor >= 0) cuerpos[mejor].push(l);
     else sueltas.push(l);
   }
+
 
   // 4) Componer cada bloque respetando el orden de lectura: columnas de
   //    izquierda a derecha, y dentro de cada columna de arriba abajo.
@@ -359,6 +477,9 @@ function extraerBloquesNativos(
     });
     const raw = lineasCuerpo.map((l) => l.text).join("\n");
     const limpio = limpiarTexto(raw);
+
+
+
     if (limpio.length < 40 || esRuidoMaquetacion(limpio)) continue;
     const meta = extraerMetadatos(`${limpio}\n${art.titulo}`, "");
     bloques.push({
@@ -459,7 +580,7 @@ export default function SocidaPressApp() {
         canvas.height = viewport.height;
         const ctx = canvas.getContext("2d");
         if (!ctx) continue;
-        await page.render({ canvasContext: ctx, viewport, canvas }).promise;
+        await page.render({ canvasContext: ctx, viewport }).promise;
         pageCanvases.push({ page: p, canvas });
 
         // Extraer texto nativo del PDF (mucho más fiable que OCR).
@@ -480,6 +601,11 @@ export default function SocidaPressApp() {
             };
           });
           nativePageItems.push({ page: p, items: nItems });
+
+
+
+
+
 
           const pageStr = rawItems
             .map((it) => it.str + (it.hasEOL ? "\n" : " "))
