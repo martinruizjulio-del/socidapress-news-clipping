@@ -302,12 +302,30 @@ function extraerBloquesNativos(
     }
   }
 
+  // Detecta letras capitulares (drop caps): un solo carácter con tamaño
+  // enorme. Antes de descartarlas, las fusionamos con la línea contigua
+  // a su derecha para no perder la primera letra del cuerpo ("D" + "el 19…").
+  const capitulares = lineas.filter(
+    (l) => l.text.trim().length <= 2 && l.size >= median * 2.5,
+  );
+  const capSet = new Set(capitulares);
+  for (const dc of capitulares) {
+    const letra = dc.text.trim();
+    const destino = lineas.find(
+      (l) =>
+        !capSet.has(l) &&
+        l.x >= dc.x - 5 &&
+        l.x <= dc.xEnd + dc.size * 2 &&
+        Math.abs(l.y - dc.y) < dc.size,
+    );
+    if (destino) destino.text = letra + destino.text;
+  }
+
   const limpias = lineas
+    .filter((l) => !capSet.has(l))
     .map((l) => ({ ...l, text: l.text.replace(/\s+/g, " ").trim() }))
-    .filter((l) => l.text.length > 0)
-    // Descarta letras capitulares (drop caps): un solo carácter con
-    // tamaño enorme respecto al cuerpo del texto.
-    .filter((l) => !(l.text.length <= 2 && l.size >= median * 2.5));
+    .filter((l) => l.text.length > 0);
+
 
   // 2) Identificar titulares (líneas con fuente notablemente mayor que la
   //    mediana del cuerpo). Se exigen al menos dos palabras y 8 caracteres
