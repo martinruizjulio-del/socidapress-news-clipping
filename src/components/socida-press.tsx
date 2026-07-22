@@ -1054,26 +1054,66 @@ export default function SocidaPressApp() {
                   </p>
                 )}
                 <p className="text-xs text-muted-foreground">
-                  Sube el PDF y SocidaPress intentará detectar automáticamente
-                  el periódico, el título, la fecha y la hora. Podrás revisarlos
-                  después.
+                  Sube el PDF y en el siguiente paso podrás marcar sobre cada
+                  página la zona exacta que quieres escanear (opcional). Después
+                  SocidaPress detectará automáticamente el periódico, el título,
+                  la fecha y la hora.
                 </p>
               </div>
 
               <div className="flex justify-end">
                 <Button
-                  onClick={processPdf}
+                  onClick={loadPdfForRegion}
                   disabled={!file}
                   size="lg"
                   className="gap-2"
                 >
                   <FileUp className="h-4 w-4" />
-                  Procesar PDF
+                  Continuar
                 </Button>
               </div>
             </CardContent>
           </Card>
         )}
+
+        {stage === "region" && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Marca la zona a escanear</CardTitle>
+              <p className="text-sm text-muted-foreground">
+                Arrastra con el ratón sobre cada página para seleccionar la
+                zona que quieres importar. Si dejas una página sin marcar, se
+                escaneará completa.
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {thumbs.map((t) => (
+                <RegionPicker
+                  key={t.page}
+                  thumb={t}
+                  rect={regions[t.page]}
+                  onChange={(rect) =>
+                    setRegions((prev) => {
+                      const n = { ...prev };
+                      if (rect) n[t.page] = rect;
+                      else delete n[t.page];
+                      return n;
+                    })
+                  }
+                />
+              ))}
+              <div className="flex justify-between">
+                <Button variant="outline" onClick={handleReset} className="gap-2">
+                  <RotateCcw className="h-4 w-4" /> Volver
+                </Button>
+                <Button onClick={processPdf} size="lg" className="gap-2">
+                  <FileUp className="h-4 w-4" /> Procesar
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
 
         {stage === "processing" && (
           <Card>
