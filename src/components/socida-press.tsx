@@ -601,7 +601,8 @@ export default function SocidaPressApp() {
             };
           });
           nativePageItems.push({ page: p, items: nItems });
-          document.title = `DBG p${p} n=${nItems.length} s=${JSON.stringify(nItems.slice(0,8).map(i=>i.str))}`;
+
+
 
 
 
