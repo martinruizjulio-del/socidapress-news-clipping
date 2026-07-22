@@ -623,7 +623,7 @@ export default function SocidaPressApp() {
             }
           }
         } catch (err) {
-          console.log("DBG getTextContent ERROR page", p, err);
+          document.title = `DBG tc-error p${p} ${String(err).slice(0,100)}`;
         }
 
 
