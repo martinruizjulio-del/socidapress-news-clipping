@@ -981,6 +981,35 @@ export default function SocidaPressApp() {
                             }}
                             className="font-semibold"
                           />
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            <Input
+                              type="text"
+                              value={b.fecha ?? ""}
+                              placeholder="Fecha (opcional)"
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                setTextBlocks((prev) =>
+                                  prev.map((x) =>
+                                    x.id === b.id ? { ...x, fecha: v } : x,
+                                  ),
+                                );
+                              }}
+                            />
+                            <Input
+                              type="text"
+                              value={b.hora ?? ""}
+                              placeholder="Hora (opcional)"
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                setTextBlocks((prev) =>
+                                  prev.map((x) =>
+                                    x.id === b.id ? { ...x, hora: v } : x,
+                                  ),
+                                );
+                              }}
+                            />
+                          </div>
+
                           <Textarea
                             value={b.text}
                             onChange={(e) => {
