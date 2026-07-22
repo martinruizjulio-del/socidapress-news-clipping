@@ -1221,7 +1221,7 @@ export default function SocidaPressApp() {
         hora: t.hora ?? "",
         texto: t.text,
         imagenPagina: pi?.fullDataUrl ?? null,
-        imagenSeciones: undefined,
+
         imagenSeleccion: pi?.cropDataUrl ?? null,
       };
     }),
