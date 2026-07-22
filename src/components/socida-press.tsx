@@ -530,7 +530,7 @@ export default function SocidaPressApp() {
         canvas.height = viewport.height;
         const ctx = canvas.getContext("2d");
         if (!ctx) continue;
-        await page.render({ canvasContext: ctx, viewport, canvas }).promise;
+        await page.render({ canvasContext: ctx, viewport }).promise;
         pageCanvases.push({ page: p, canvas });
 
         // Extraer texto nativo del PDF (mucho más fiable que OCR).
