@@ -23,8 +23,11 @@ interface ExtractedTextBlock {
   id: string;
   page: number;
   titulo?: string;
+  fecha?: string;
+  hora?: string;
   text: string;
 }
+
 
 interface Metadata {
   periodico: string;
