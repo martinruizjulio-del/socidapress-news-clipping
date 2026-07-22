@@ -213,7 +213,7 @@ function esEtiquetaSeccion(texto: string): boolean {
 
 // Limpia texto (OCR o nativo) eliminando caracteres extraños,
 // símbolos sueltos, guiones de fin de línea y espacios repetidos.
-function limpiarTexto(texto: string): string {
+export function limpiarTexto(texto: string): string {
   let s = texto;
   // Elimina caracteres de control invisibles
   s = s.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, "");
