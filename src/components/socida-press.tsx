@@ -253,7 +253,15 @@ export function limpiarTexto(texto: string): string {
     })
     .join("\n");
   // Palabras de una sola letra sueltas (excepto a, o, y, e, u)
-  s = s.replace(/\b(?![aAoOyYeEuU]\b)[a-záéíóúñ]\b/g, "").replace(/[ \t]{2,}/g, " ");
+  // Palabras de una sola letra sueltas (excepto a, o, y, e, u). Usamos
+  // lookarounds Unicode porque \b en JS ignora los acentos y borraría
+  // ñ/á/é interiores de palabras como "años" o "después".
+  s = s
+    .replace(
+      /(?<![\p{L}\p{N}_])(?![aAoOyYeEuUiI](?![\p{L}\p{N}_]))[\p{L}](?![\p{L}\p{N}_])/gu,
+      "",
+    )
+    .replace(/[ \t]{2,}/g, " ");
   return s.trim();
 }
 
