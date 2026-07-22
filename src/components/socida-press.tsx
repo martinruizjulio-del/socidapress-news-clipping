@@ -755,7 +755,7 @@ export default function SocidaPressApp() {
               fn === OPS.paintInlineImageXObject
             ) {
               const args = opList.argsArray[i];
-              const name = args?.[0];
+              const name = args?.[0] as string | undefined;
               if (!name || seen.has(name)) continue;
               seen.add(name);
               try {
