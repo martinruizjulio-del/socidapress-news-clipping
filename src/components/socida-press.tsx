@@ -963,9 +963,12 @@ export default function SocidaPressApp() {
                   <h3 className="mb-3 text-sm font-semibold">Texto</h3>
                   <div className="space-y-3 rounded-md border bg-muted/30 p-4">
                     {finalTexts.map((t) => (
-                      <p key={t.id} className="whitespace-pre-wrap text-sm">
-                        {t.text}
-                      </p>
+                      <div key={t.id} className="space-y-1">
+                        {t.titulo && (
+                          <h4 className="text-sm font-semibold">{t.titulo}</h4>
+                        )}
+                        <p className="whitespace-pre-wrap text-sm">{t.text}</p>
+                      </div>
                     ))}
                   </div>
                 </div>
