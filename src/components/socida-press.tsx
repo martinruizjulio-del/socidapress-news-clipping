@@ -38,6 +38,14 @@ interface Metadata {
 
 type Stage = "form" | "region" | "processing" | "select" | "done";
 
+// Imagen completa de una página + (opcional) recorte de la zona marcada.
+// Sirve como "prueba visual" que acompaña a los bloques extraídos.
+interface PageImage {
+  page: number;
+  fullDataUrl: string;
+  cropDataUrl?: string;
+}
+
 // Rectángulo de recorte en coordenadas de usuario del PDF (mismo espacio que
 // los items de texto nativos y el viewBox de pdfjs).
 type PdfRect = { xMin: number; xMax: number; yMin: number; yMax: number };
