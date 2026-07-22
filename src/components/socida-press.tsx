@@ -178,38 +178,144 @@ function esRuidoMaquetacion(texto: string): boolean {
   return false;
 }
 
-// Limpia el texto crudo del OCR eliminando caracteres extraños,
+// Limpia texto (OCR o nativo) eliminando caracteres extraños,
 // símbolos sueltos, guiones de fin de línea y espacios repetidos.
 function limpiarTexto(texto: string): string {
   let s = texto;
   // Normaliza a NFC y elimina caracteres de control invisibles
   s = s.normalize("NFC");
   s = s.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, "");
-  // Elimina caracteres de reemplazo y símbolos raros de OCR
-  s = s.replace(/[\uFFFD\u00AD\u200B-\u200F\u202A-\u202E\u2060]/g, "");
-  // Sustituye comillas tipográficas y guiones largos por sus equivalentes ASCII
-  s = s.replace(/[“”«»]/g, '"').replace(/[‘’‚]/g, "'").replace(/[–—]/g, "-");
-  // Quita guiones al final de línea (palabras partidas por columnas)
-  s = s.replace(/-\n(\p{Ll})/gu, "$1");
-  // Une saltos de línea internos de un mismo párrafo
+  // Elimina reemplazos, guiones opcionales y marcas de dirección
+  s = s.replace(/[\uFFFD\u00AD\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g, "");
+  // Comillas tipográficas y guiones largos -> ASCII
+  s = s.replace(/[“”«»„]/g, '"').replace(/[‘’‚‛]/g, "'").replace(/[–—―]/g, "-");
+  // Puntos suspensivos tipográficos
+  s = s.replace(/…/g, "...");
+  // Guiones de palabras partidas por columnas / fin de línea
+  s = s.replace(/(\p{L})-\s*\n\s*(\p{Ll})/gu, "$1$2");
+  // Une saltos de línea internos de un mismo párrafo (no dobles)
   s = s.replace(/([^\n])\n(?!\n)/g, "$1 ");
-  // Solo mantenemos letras (con acentos), dígitos, signos de puntuación
-  // habituales y espacios. Todo lo demás es ruido de OCR.
-  s = s.replace(/[^\p{L}\p{N}\s.,;:!¡¿?()"'%€$£/\-\n]/gu, " ");
-  // Colapsa espacios y saltos repetidos
+  // Solo letras (con acentos), dígitos, puntuación habitual y espacios
+  s = s.replace(/[^\p{L}\p{N}\s.,;:!¡¿?()"'%€$£ºª&/\-\n]/gu, " ");
+  // Colapsa espacios
   s = s.replace(/[ \t]{2,}/g, " ");
+  s = s.replace(/\s+([.,;:!?])/g, "$1");
   s = s.replace(/\n{3,}/g, "\n\n");
-  // Quita líneas que quedaron con muy pocos caracteres alfabéticos
+  // Elimina líneas con muy pocas letras o dominadas por ruido no alfabético
   s = s
     .split("\n")
     .filter((l) => {
       const t = l.trim();
       if (!t) return true;
       const letras = t.replace(/[^\p{L}]/gu, "").length;
-      return letras >= 3;
+      if (letras < 4) return false;
+      // ratio letras/total razonable
+      if (letras / t.length < 0.55) return false;
+      return true;
     })
     .join("\n");
+  // Palabras de una sola letra sueltas (excepto a, o, y, e, u)
+  s = s.replace(/\b(?![aAoOyYeEuU]\b)[a-záéíóúñ]\b/g, "").replace(/[ \t]{2,}/g, " ");
   return s.trim();
+}
+
+// Item del PDF con posición y tamaño ya normalizados.
+type NativeItem = {
+  str: string;
+  x: number;
+  y: number;
+  size: number;
+  hasEOL: boolean;
+};
+
+// Convierte los items de pdf.js a bloques {titulo?, text} detectando cambios de
+// tamaño (subtítulos), párrafos por gaps verticales y columnas por gaps de X.
+function extraerBloquesNativos(items: NativeItem[]): { titulo?: string; text: string }[] {
+  if (!items.length) return [];
+
+  // Estimar tamaño mediana (cuerpo de texto)
+  const sizes = items.map((i) => i.size).filter((s) => s > 0).sort((a, b) => a - b);
+  const median = sizes[Math.floor(sizes.length / 2)] || 10;
+
+  // Agrupar items en líneas por columna (x aproximada) y por y
+  const sorted = [...items].sort((a, b) => {
+    // Ordena por columna aproximada (bloques de 100pt en X * escala 2 = 200)
+    const col = Math.floor(a.x / 200) - Math.floor(b.x / 200);
+    if (col !== 0) return col;
+    return b.y - a.y; // pdf.js: y crece hacia arriba
+  });
+
+  type Linea = { x: number; y: number; size: number; text: string };
+  const lineas: Linea[] = [];
+  let cur: Linea | null = null;
+  const yTol = median * 0.6;
+  for (const it of sorted) {
+    const str = it.str;
+    if (!str.trim() && !it.hasEOL) continue;
+    if (
+      cur &&
+      Math.abs(cur.y - it.y) <= yTol &&
+      Math.abs(cur.size - it.size) < 0.5 &&
+      Math.floor(cur.x / 200) === Math.floor(it.x / 200)
+    ) {
+      cur.text += (cur.text.endsWith(" ") || !str.startsWith(" ") ? "" : "") + str;
+    } else {
+      if (cur) lineas.push(cur);
+      cur = { x: it.x, y: it.y, size: it.size, text: str };
+    }
+    if (it.hasEOL) {
+      if (cur) lineas.push(cur);
+      cur = null;
+    }
+  }
+  if (cur) lineas.push(cur);
+
+  // Descartar líneas basura antes de agrupar
+  const limpias = lineas
+    .map((l) => ({ ...l, text: l.text.replace(/\s+/g, " ").trim() }))
+    .filter((l) => l.text.length > 0);
+
+  // Recorremos líneas y agrupamos en bloques.
+  // - Una línea con size > median * 1.3 y pocas palabras => subtítulo (inicia bloque)
+  // - Gap vertical grande (> median * 2) entre líneas => nuevo párrafo/bloque
+  const bloques: { titulo?: string; text: string }[] = [];
+  let bloqueActual: { titulo?: string; text: string } | null = null;
+  let ultimaY: number | null = null;
+  let ultimaCol: number | null = null;
+
+  const pushBloque = () => {
+    if (bloqueActual) {
+      const limpio = limpiarTexto(bloqueActual.text);
+      if (limpio.length > 40 && !esRuidoMaquetacion(limpio)) {
+        bloques.push({ titulo: bloqueActual.titulo, text: limpio });
+      }
+      bloqueActual = null;
+    }
+  };
+
+  for (const l of limpias) {
+    const col = Math.floor(l.x / 200);
+    const esSubtitulo =
+      l.size >= median * 1.3 && l.text.split(/\s+/).length <= 14 && l.text.length < 120;
+    const gap = ultimaY !== null ? Math.abs(ultimaY - l.y) : 0;
+    const nuevoBloque =
+      esSubtitulo ||
+      !bloqueActual ||
+      (ultimaCol !== null && ultimaCol !== col) ||
+      gap > median * 2.2;
+
+    if (nuevoBloque) {
+      pushBloque();
+      bloqueActual = { titulo: esSubtitulo ? l.text : undefined, text: esSubtitulo ? "" : l.text };
+    } else {
+      bloqueActual!.text += (bloqueActual!.text ? " " : "") + l.text;
+    }
+    ultimaY = l.y;
+    ultimaCol = col;
+  }
+  pushBloque();
+
+  return bloques;
 }
 
 
