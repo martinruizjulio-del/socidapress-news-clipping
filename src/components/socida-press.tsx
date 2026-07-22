@@ -1,4 +1,4 @@
-import { type PointerEvent as ReactPointerEvent, useCallback, useMemo, useRef, useState } from "react";
+import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -8,7 +8,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
-import { Newspaper, FileUp, Download, RotateCcw, Loader2 } from "lucide-react";
+import { Newspaper, FileUp, Download, RotateCcw, Loader2, Library, Trash2, Save, ArrowLeft, Pencil } from "lucide-react";
+
 
 // Tipos internos
 interface ExtractedImage {
@@ -36,7 +37,53 @@ interface Metadata {
   hora: string;
 }
 
-type Stage = "form" | "region" | "processing" | "select" | "done";
+type Stage = "form" | "region" | "processing" | "select" | "done" | "library";
+
+// Noticia guardada persistente (localStorage). Contiene todo lo necesario
+// para mostrarla y editarla más tarde sin volver a procesar el PDF.
+interface SavedBlock {
+  id: string;
+  page: number;
+  titulo: string;
+  fecha: string;
+  hora: string;
+  texto: string;
+  imagenPagina?: string | null;
+  imagenSeleccion?: string | null;
+}
+interface SavedNoticia {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+  periodico: string;
+  titulo: string;
+  fecha: string;
+  hora: string;
+  bloques: SavedBlock[];
+  imagenes: { id: string; dataUrl: string; ancho: number; alto: number }[];
+}
+
+const STORAGE_KEY = "socidapress:noticias";
+
+function cargarNoticias(): SavedNoticia[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+function guardarNoticias(list: SavedNoticia[]) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+  } catch (e) {
+    console.error(e);
+    toast.error("No se pudo guardar en la biblioteca (¿espacio agotado?).");
+  }
+}
+
 
 // Imagen completa de una página + (opcional) recorte de la zona marcada.
 // Sirve como "prueba visual" que acompaña a los bloques extraídos.
@@ -338,23 +385,33 @@ function extraerBloquesNativos(
   }
 
   // Detecta letras capitulares (drop caps): un solo carácter con tamaño
-  // enorme. Antes de descartarlas, las fusionamos con la línea contigua
-  // a su derecha para no perder la primera letra del cuerpo ("D" + "el 19…").
+  // notablemente mayor al cuerpo. Antes de descartarlas, las fusionamos
+  // con la línea contigua a su derecha para no perder la primera letra
+  // del cuerpo ("D" + "el 19…"). Aceptamos hasta 3 caracteres por si el
+  // OCR/parser mezcla la capitular con la siguiente ("De" o "Del").
   const capitulares = lineas.filter(
-    (l) => l.text.trim().length <= 2 && l.size >= median * 2.5,
+    (l) => l.text.trim().length <= 3 && l.size >= median * 1.9,
   );
   const capSet = new Set(capitulares);
   for (const dc of capitulares) {
     const letra = dc.text.trim();
-    const destino = lineas.find(
-      (l) =>
-        !capSet.has(l) &&
-        l.x >= dc.x - 5 &&
-        l.x <= dc.xEnd + dc.size * 2 &&
-        Math.abs(l.y - dc.y) < dc.size,
-    );
+    // Candidatas: líneas de cuerpo a la derecha de la capitular y dentro
+    // de su altura vertical (la capitular ocupa varias líneas de cuerpo).
+    const candidatas = lineas
+      .filter(
+        (l) =>
+          !capSet.has(l) &&
+          l.x >= dc.xEnd - dc.size * 0.4 &&
+          l.x <= dc.xEnd + dc.size * 2.5 &&
+          l.y <= dc.y + dc.size * 0.6 &&
+          l.y >= dc.y - dc.size * 2.5,
+      )
+      // La primera línea del párrafo es la más alta (mayor y en pdfjs).
+      .sort((a, b) => b.y - a.y);
+    const destino = candidatas[0];
     if (destino) destino.text = letra + destino.text;
   }
+
 
   const limpias = lineas
     .filter((l) => !capSet.has(l))
@@ -671,8 +728,275 @@ function RegionPicker({
   );
 }
 
+interface LibraryViewProps {
+  noticias: SavedNoticia[];
+  editingId: string | null;
+  highlightId: string | null;
+  onEdit: (id: string | null) => void;
+  onDelete: (id: string) => void;
+  onUpdate: (n: SavedNoticia) => void;
+  onNew: () => void;
+}
 
+function LibraryView({
+  noticias,
+  editingId,
+  highlightId,
+  onEdit,
+  onDelete,
+  onUpdate,
+  onNew,
+}: LibraryViewProps) {
+  const editing = noticias.find((n) => n.id === editingId) ?? null;
+  const [draft, setDraft] = useState<SavedNoticia | null>(editing);
+  useEffect(() => {
+    setDraft(editing ? JSON.parse(JSON.stringify(editing)) : null);
+  }, [editingId, editing]);
 
+  if (editing && draft) {
+    const updateBlock = (bid: string, patch: Partial<SavedBlock>) => {
+      setDraft({
+        ...draft,
+        bloques: draft.bloques.map((b) => (b.id === bid ? { ...b, ...patch } : b)),
+      });
+    };
+    const removeBlock = (bid: string) => {
+      setDraft({ ...draft, bloques: draft.bloques.filter((b) => b.id !== bid) });
+    };
+    return (
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={() => onEdit(null)} className="gap-2">
+              <ArrowLeft className="h-4 w-4" />
+              Volver
+            </Button>
+            <CardTitle>Editar noticia</CardTitle>
+          </div>
+          <div className="flex gap-2">
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => {
+                if (confirm("¿Eliminar esta noticia de la biblioteca?")) {
+                  onDelete(draft.id);
+                  onEdit(null);
+                }
+              }}
+              className="gap-2"
+            >
+              <Trash2 className="h-4 w-4" />
+              Eliminar
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => {
+                onUpdate(draft);
+                toast.success("Cambios guardados.");
+                onEdit(null);
+              }}
+              className="gap-2"
+            >
+              <Save className="h-4 w-4" />
+              Guardar cambios
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label>Periódico</Label>
+              <Input
+                value={draft.periodico}
+                onChange={(e) => setDraft({ ...draft, periodico: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Titular</Label>
+              <Input
+                value={draft.titulo}
+                onChange={(e) => setDraft({ ...draft, titulo: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Fecha</Label>
+              <Input
+                value={draft.fecha}
+                onChange={(e) => setDraft({ ...draft, fecha: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Hora</Label>
+              <Input
+                value={draft.hora}
+                onChange={(e) => setDraft({ ...draft, hora: e.target.value })}
+              />
+            </div>
+          </div>
+
+          <Separator />
+
+          <div className="space-y-4">
+            <h3 className="text-sm font-semibold">
+              Bloques de texto ({draft.bloques.length})
+            </h3>
+            {draft.bloques.map((b) => (
+              <div key={b.id} className="space-y-3 rounded-md border bg-muted/30 p-4">
+                <div className="grid gap-3 md:grid-cols-3">
+                  <div className="space-y-1 md:col-span-3">
+                    <Label className="text-xs">Título del bloque</Label>
+                    <Input
+                      value={b.titulo}
+                      onChange={(e) => updateBlock(b.id, { titulo: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Fecha</Label>
+                    <Input
+                      value={b.fecha}
+                      onChange={(e) => updateBlock(b.id, { fecha: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Hora</Label>
+                    <Input
+                      value={b.hora}
+                      onChange={(e) => updateBlock(b.id, { hora: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Página</Label>
+                    <Input value={String(b.page)} disabled />
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Texto</Label>
+                  <Textarea
+                    rows={8}
+                    value={b.texto}
+                    onChange={(e) => updateBlock(b.id, { texto: e.target.value })}
+                  />
+                </div>
+                {(b.imagenPagina || b.imagenSeleccion) && (
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {b.imagenPagina && (
+                      <a href={b.imagenPagina} target="_blank" rel="noreferrer">
+                        <img
+                          src={b.imagenPagina}
+                          alt={`Página ${b.page}`}
+                          loading="lazy"
+                          className="w-full rounded border"
+                        />
+                      </a>
+                    )}
+                    {b.imagenSeleccion && (
+                      <a href={b.imagenSeleccion} target="_blank" rel="noreferrer">
+                        <img
+                          src={b.imagenSeleccion}
+                          alt={`Selección página ${b.page}`}
+                          loading="lazy"
+                          className="w-full rounded border"
+                        />
+                      </a>
+                    )}
+                  </div>
+                )}
+                <div className="flex justify-end">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => removeBlock(b.id)}
+                    className="gap-2 text-destructive"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Quitar bloque
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
+        <CardTitle>Biblioteca de noticias</CardTitle>
+        <Button size="sm" onClick={onNew} className="gap-2">
+          <FileUp className="h-4 w-4" />
+          Nueva noticia
+        </Button>
+      </CardHeader>
+      <CardContent>
+        {noticias.length === 0 ? (
+          <p className="py-8 text-center text-sm text-muted-foreground">
+            Todavía no has guardado ninguna noticia. Importa un PDF para empezar.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {noticias.map((n) => (
+              <div
+                key={n.id}
+                className={`flex flex-col gap-3 rounded-md border p-4 md:flex-row md:items-center ${
+                  n.id === highlightId ? "border-primary" : ""
+                }`}
+              >
+                {n.bloques[0]?.imagenSeleccion || n.bloques[0]?.imagenPagina ? (
+                  <img
+                    src={
+                      n.bloques[0]?.imagenSeleccion ?? n.bloques[0]?.imagenPagina ?? ""
+                    }
+                    alt=""
+                    loading="lazy"
+                    className="h-24 w-32 shrink-0 rounded border object-cover"
+                  />
+                ) : (
+                  <div className="flex h-24 w-32 shrink-0 items-center justify-center rounded border bg-muted text-muted-foreground">
+                    <Newspaper className="h-6 w-6" />
+                  </div>
+                )}
+                <div className="flex-1">
+                  <h3 className="font-semibold">{n.titulo || "(sin título)"}</h3>
+                  <p className="text-xs text-muted-foreground">
+                    {n.periodico} · {n.fecha || "fecha por determinar"} ·{" "}
+                    {n.hora || "hora por determinar"}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {n.bloques.length} bloque(s) · guardada el{" "}
+                    {new Date(n.updatedAt).toLocaleString("es-ES")}
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onEdit(n.id)}
+                    className="gap-2"
+                  >
+                    <Pencil className="h-4 w-4" />
+                    Ver / editar
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      if (confirm("¿Eliminar esta noticia?")) onDelete(n.id);
+                    }}
+                    className="gap-2 text-destructive"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 
 export default function SocidaPressApp() {
@@ -695,6 +1019,19 @@ export default function SocidaPressApp() {
   const [regions, setRegions] = useState<Record<number, PdfRect>>({});
   const pdfRef = useRef<unknown>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Biblioteca persistente en localStorage
+  const [saved, setSaved] = useState<SavedNoticia[]>([]);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [lastSavedId, setLastSavedId] = useState<string | null>(null);
+  useEffect(() => {
+    setSaved(cargarNoticias());
+  }, []);
+  const persist = useCallback((next: SavedNoticia[]) => {
+    setSaved(next);
+    guardarNoticias(next);
+  }, []);
+
 
   const handleReset = () => {
     setStage("form");
@@ -1132,14 +1469,60 @@ export default function SocidaPressApp() {
     metadata.fecha &&
     metadata.hora;
 
+  // Construye el objeto persistente a partir del estado actual de edición.
+  const buildSavedNoticia = (id: string, createdAt: number): SavedNoticia => ({
+    id,
+    createdAt,
+    updatedAt: Date.now(),
+    periodico: metadata.periodico,
+    titulo: metadata.titulo,
+    fecha: metadata.fecha,
+    hora: metadata.hora,
+    bloques: finalTexts.map((t) => {
+      const pi = pageImages.find((p) => p.page === t.page);
+      return {
+        id: t.id,
+        page: t.page,
+        titulo: t.titulo ?? "",
+        fecha: t.fecha ?? "",
+        hora: t.hora ?? "",
+        texto: t.text,
+        imagenPagina: pi?.fullDataUrl ?? null,
+
+        imagenSeleccion: pi?.cropDataUrl ?? null,
+      };
+    }),
+    imagenes: finalImages.map((i) => ({
+      id: i.id,
+      dataUrl: i.dataUrl,
+      ancho: i.width,
+      alto: i.height,
+    })),
+  });
+
   const handleFinish = () => {
     if (!canFinish) {
       toast.error("Revisa periódico, título, fecha y hora antes de guardar.");
       return;
     }
+    const id = `n_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const noticia = buildSavedNoticia(id, Date.now());
+    persist([noticia, ...saved]);
+    setLastSavedId(id);
     setStage("done");
-    toast.success("Noticia guardada correctamente.");
+    toast.success("Noticia guardada en la biblioteca.");
   };
+
+  const openLibrary = () => setStage("library");
+  const deleteNoticia = (id: string) => {
+    persist(saved.filter((n) => n.id !== id));
+    if (editingId === id) setEditingId(null);
+    toast.success("Noticia eliminada.");
+  };
+  const updateNoticia = (updated: SavedNoticia) => {
+    persist(saved.map((n) => (n.id === updated.id ? { ...updated, updatedAt: Date.now() } : n)));
+  };
+
 
   const handleExport = () => {
     const payload = {
@@ -1194,14 +1577,35 @@ export default function SocidaPressApp() {
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary text-primary-foreground">
             <Newspaper className="h-5 w-5" />
           </div>
-          <div>
+          <div className="flex-1">
             <h1 className="text-xl font-bold tracking-tight">SocidaPress</h1>
             <p className="text-xs text-muted-foreground">
               Importa noticias en PDF, extrae imágenes y texto por OCR
             </p>
           </div>
+          <Button
+            variant={stage === "library" ? "default" : "outline"}
+            size="sm"
+            onClick={openLibrary}
+            className="gap-2"
+          >
+            <Library className="h-4 w-4" />
+            Biblioteca
+            {saved.length > 0 && (
+              <span className="ml-1 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium">
+                {saved.length}
+              </span>
+            )}
+          </Button>
+          {stage !== "form" && stage !== "library" && (
+            <Button variant="ghost" size="sm" onClick={handleReset} className="gap-2">
+              <RotateCcw className="h-4 w-4" />
+              Nueva
+            </Button>
+          )}
         </div>
       </header>
+
 
       <main className="mx-auto max-w-5xl px-6 py-8">
         {stage === "form" && (
@@ -1631,7 +2035,20 @@ export default function SocidaPressApp() {
             </CardContent>
           </Card>
         )}
+
+        {stage === "library" && (
+          <LibraryView
+            noticias={saved}
+            editingId={editingId}
+            highlightId={lastSavedId}
+            onEdit={setEditingId}
+            onDelete={deleteNoticia}
+            onUpdate={updateNoticia}
+            onNew={handleReset}
+          />
+        )}
       </main>
+
     </div>
   );
 }
