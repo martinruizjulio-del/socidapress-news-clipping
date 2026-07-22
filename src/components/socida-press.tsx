@@ -37,7 +37,53 @@ interface Metadata {
   hora: string;
 }
 
-type Stage = "form" | "region" | "processing" | "select" | "done";
+type Stage = "form" | "region" | "processing" | "select" | "done" | "library";
+
+// Noticia guardada persistente (localStorage). Contiene todo lo necesario
+// para mostrarla y editarla más tarde sin volver a procesar el PDF.
+interface SavedBlock {
+  id: string;
+  page: number;
+  titulo: string;
+  fecha: string;
+  hora: string;
+  texto: string;
+  imagenPagina?: string | null;
+  imagenSeleccion?: string | null;
+}
+interface SavedNoticia {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+  periodico: string;
+  titulo: string;
+  fecha: string;
+  hora: string;
+  bloques: SavedBlock[];
+  imagenes: { id: string; dataUrl: string; ancho: number; alto: number }[];
+}
+
+const STORAGE_KEY = "socidapress:noticias";
+
+function cargarNoticias(): SavedNoticia[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+function guardarNoticias(list: SavedNoticia[]) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+  } catch (e) {
+    console.error(e);
+    toast.error("No se pudo guardar en la biblioteca (¿espacio agotado?).");
+  }
+}
+
 
 // Imagen completa de una página + (opcional) recorte de la zona marcada.
 // Sirve como "prueba visual" que acompaña a los bloques extraídos.
