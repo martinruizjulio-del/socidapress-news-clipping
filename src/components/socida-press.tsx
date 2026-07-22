@@ -527,6 +527,134 @@ function extraerBloquesNativos(
     });
   }
 
+// Selector de zona sobre la miniatura de una página. Convierte las
+// coordenadas del ratón (en píxeles del <img>) a coordenadas de usuario del
+// PDF (mismo espacio que los items nativos), para que el filtrado sea preciso
+// sea cual sea el tamaño al que se muestre la miniatura.
+function RegionPicker({
+  thumb,
+  rect,
+  onChange,
+}: {
+  thumb: PageThumb;
+  rect: PdfRect | undefined;
+  onChange: (rect: PdfRect | undefined) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+
+  const [vx0, vy0, vx1, vy1] = thumb.viewBox;
+  const pdfW = vx1 - vx0;
+  const pdfH = vy1 - vy0;
+
+  const toPdf = (px: number, py: number, w: number, h: number): { x: number; y: number } => ({
+    x: vx0 + (px / w) * pdfW,
+    y: vy1 - (py / h) * pdfH,
+  });
+
+  const toPct = (r: PdfRect) => ({
+    left: `${((r.xMin - vx0) / pdfW) * 100}%`,
+    top: `${((vy1 - r.yMax) / pdfH) * 100}%`,
+    width: `${((r.xMax - r.xMin) / pdfW) * 100}%`,
+    height: `${((r.yMax - r.yMin) / pdfH) * 100}%`,
+  });
+
+  const onDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.setPointerCapture(e.pointerId);
+    const b = el.getBoundingClientRect();
+    const x = e.clientX - b.left;
+    const y = e.clientY - b.top;
+    setDrag({ x0: x, y0: y, x1: x, y1: y });
+  };
+  const onMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!drag) return;
+    const el = containerRef.current;
+    if (!el) return;
+    const b = el.getBoundingClientRect();
+    setDrag({ ...drag, x1: e.clientX - b.left, y1: e.clientY - b.top });
+  };
+  const onUp = () => {
+    if (!drag) return;
+    const el = containerRef.current;
+    if (!el) {
+      setDrag(null);
+      return;
+    }
+    const b = el.getBoundingClientRect();
+    const x0 = Math.max(0, Math.min(drag.x0, drag.x1));
+    const y0 = Math.max(0, Math.min(drag.y0, drag.y1));
+    const x1 = Math.min(b.width, Math.max(drag.x0, drag.x1));
+    const y1 = Math.min(b.height, Math.max(drag.y0, drag.y1));
+    setDrag(null);
+    if (x1 - x0 < 10 || y1 - y0 < 10) return;
+    const a = toPdf(x0, y0, b.width, b.height);
+    const c = toPdf(x1, y1, b.width, b.height);
+    onChange({
+      xMin: Math.min(a.x, c.x),
+      xMax: Math.max(a.x, c.x),
+      yMin: Math.min(a.y, c.y),
+      yMax: Math.max(a.y, c.y),
+    });
+  };
+
+  const overlay = drag
+    ? {
+        left: Math.min(drag.x0, drag.x1),
+        top: Math.min(drag.y0, drag.y1),
+        width: Math.abs(drag.x1 - drag.x0),
+        height: Math.abs(drag.y1 - drag.y0),
+      }
+    : null;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-medium">Página {thumb.page}</p>
+        {rect && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => onChange(undefined)}
+          >
+            Limpiar zona
+          </Button>
+        )}
+      </div>
+      <div
+        ref={containerRef}
+        onPointerDown={onDown}
+        onPointerMove={onMove}
+        onPointerUp={onUp}
+        className="relative inline-block max-w-full cursor-crosshair select-none rounded border bg-muted"
+        style={{ touchAction: "none" }}
+      >
+        <img
+          src={thumb.dataUrl}
+          alt={`Página ${thumb.page}`}
+          className="block max-w-full h-auto pointer-events-none"
+          draggable={false}
+          loading="lazy"
+        />
+        {rect && !drag && (
+          <div
+            className="pointer-events-none absolute border-2 border-primary bg-primary/15"
+            style={toPct(rect)}
+          />
+        )}
+        {overlay && (
+          <div
+            className="pointer-events-none absolute border-2 border-primary/70 bg-primary/10"
+            style={overlay}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 
 
 
