@@ -1547,16 +1547,74 @@ export default function SocidaPressApp() {
               )}
               {finalTexts.length > 0 && (
                 <div>
-                  <h3 className="mb-3 text-sm font-semibold">Texto</h3>
-                  <div className="space-y-3 rounded-md border bg-muted/30 p-4">
-                    {finalTexts.map((t) => (
-                      <div key={t.id} className="space-y-1">
-                        {t.titulo && (
-                          <h4 className="text-sm font-semibold">{t.titulo}</h4>
-                        )}
-                        <p className="whitespace-pre-wrap text-sm">{t.text}</p>
-                      </div>
-                    ))}
+                  <h3 className="mb-3 text-sm font-semibold">
+                    Bloques guardados ({finalTexts.length})
+                  </h3>
+                  <div className="space-y-6">
+                    {finalTexts.map((t) => {
+                      const pi = pageImages.find((p) => p.page === t.page);
+                      return (
+                        <div
+                          key={t.id}
+                          className="space-y-3 rounded-md border bg-muted/30 p-4"
+                        >
+                          <div className="space-y-1">
+                            {t.titulo && (
+                              <h4 className="text-base font-semibold">
+                                {t.titulo}
+                              </h4>
+                            )}
+                            <p className="text-xs text-muted-foreground">
+                              Página {t.page} · {t.fecha || "fecha por determinar"} ·{" "}
+                              {t.hora || "hora por determinar"}
+                            </p>
+                          </div>
+                          {(pi?.fullDataUrl || pi?.cropDataUrl) && (
+                            <div className="grid gap-3 md:grid-cols-2">
+                              {pi?.fullDataUrl && (
+                                <figure className="space-y-1">
+                                  <a
+                                    href={pi.fullDataUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    <img
+                                      src={pi.fullDataUrl}
+                                      alt={`Página ${t.page} completa`}
+                                      loading="lazy"
+                                      className="w-full rounded border"
+                                    />
+                                  </a>
+                                  <figcaption className="text-xs text-muted-foreground">
+                                    Página completa
+                                  </figcaption>
+                                </figure>
+                              )}
+                              {pi?.cropDataUrl && (
+                                <figure className="space-y-1">
+                                  <a
+                                    href={pi.cropDataUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    <img
+                                      src={pi.cropDataUrl}
+                                      alt={`Selección de la página ${t.page}`}
+                                      loading="lazy"
+                                      className="w-full rounded border"
+                                    />
+                                  </a>
+                                  <figcaption className="text-xs text-muted-foreground">
+                                    Selección marcada
+                                  </figcaption>
+                                </figure>
+                              )}
+                            </div>
+                          )}
+                          <p className="whitespace-pre-wrap text-sm">{t.text}</p>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}
