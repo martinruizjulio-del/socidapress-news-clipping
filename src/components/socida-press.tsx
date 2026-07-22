@@ -559,7 +559,7 @@ function RegionPicker({
     height: `${((r.yMax - r.yMin) / pdfH) * 100}%`,
   });
 
-  const onDown = (e: React.PointerEvent<HTMLDivElement>) => {
+  const onDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     const el = containerRef.current;
     if (!el) return;
     el.setPointerCapture(e.pointerId);
@@ -568,7 +568,7 @@ function RegionPicker({
     const y = e.clientY - b.top;
     setDrag({ x0: x, y0: y, x1: x, y1: y });
   };
-  const onMove = (e: React.PointerEvent<HTMLDivElement>) => {
+  const onMove = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (!drag) return;
     const el = containerRef.current;
     if (!el) return;
