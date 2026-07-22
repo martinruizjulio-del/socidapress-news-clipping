@@ -423,6 +423,7 @@ function extraerBloquesNativos(
   const cuerpos: Linea[][] = articulos.map(() => []);
   const sueltas: Linea[] = [];
   for (const l of limpias) {
+    if (consumidas.has(l)) continue; // ya forma parte de un titular/deck
     if (esHeadline(l)) continue;
     // Ignora líneas que son ruido de maquetación (firmas, folios, créditos,
     // antetítulos en mayúsculas, etiquetas de sección) para que no
@@ -437,7 +438,7 @@ function extraerBloquesNativos(
     let mejor = -1;
     let mejorDy = Infinity;
     for (let i = 0; i < articulos.length; i++) {
-      const hy = articulos[i].headlineY;
+      const hy = articulos[i].headlineBottom;
       // La línea de cuerpo debe estar por debajo (o casi) del titular.
       if (hy >= l.y - median * 0.5) {
         const dy = hy - l.y;
@@ -450,6 +451,7 @@ function extraerBloquesNativos(
     if (mejor >= 0) cuerpos[mejor].push(l);
     else sueltas.push(l);
   }
+
 
   // 4) Componer cada bloque respetando el orden de lectura: columnas de
   //    izquierda a derecha, y dentro de cada columna de arriba abajo.
