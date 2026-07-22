@@ -1768,7 +1768,20 @@ export default function SocidaPressApp() {
             </CardContent>
           </Card>
         )}
+
+        {stage === "library" && (
+          <LibraryView
+            noticias={saved}
+            editingId={editingId}
+            highlightId={lastSavedId}
+            onEdit={setEditingId}
+            onDelete={deleteNoticia}
+            onUpdate={updateNoticia}
+            onNew={handleReset}
+          />
+        )}
       </main>
+
     </div>
   );
 }
