@@ -243,6 +243,41 @@ export default function SocidaPressApp() {
         await page.render({ canvasContext: ctx, viewport, canvas }).promise;
         pageCanvases.push({ page: p, canvas });
 
+        // Extraer texto nativo del PDF (mucho más fiable que OCR para
+        // detectar cabecera, fecha y título por tamaño de fuente).
+        try {
+          const tc = await page.getTextContent();
+          type TItem = { str: string; height?: number; transform?: number[]; hasEOL?: boolean };
+          const items = (tc.items as unknown[]).filter(
+            (it): it is TItem => !!it && typeof (it as TItem).str === "string",
+          );
+          const pageStr = items
+            .map((it) => it.str + (it.hasEOL ? "\n" : " "))
+            .join("")
+            .replace(/[ \t]+\n/g, "\n")
+            .trim();
+          nativePageTexts.push({ page: p, text: pageStr });
+
+          if (p === 1) {
+            // Título: buscamos los items con mayor altura de fuente
+            const withSize = items
+              .map((it) => ({
+                str: it.str.trim(),
+                size: it.height ?? (it.transform ? Math.abs(it.transform[3]) : 0),
+              }))
+              .filter((x) => x.str.length > 0);
+            if (withSize.length) {
+              const maxSize = withSize.reduce((m, x) => Math.max(m, x.size), 0);
+              const umbral = maxSize * 0.9;
+              const tituloItems = withSize.filter((x) => x.size >= umbral);
+              tituloDetectado = tituloItems.map((x) => x.str).join(" ").replace(/\s+/g, " ").trim();
+            }
+          }
+        } catch {
+          // sin capa de texto -> nos apoyaremos en el OCR
+        }
+
+
         try {
           const opList = await page.getOperatorList();
           const OPS = pdfjs.OPS;
