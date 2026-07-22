@@ -181,6 +181,36 @@ function esRuidoMaquetacion(texto: string): boolean {
   return false;
 }
 
+// Filtros a nivel de línea: firmas, folios, cabeceras de sección,
+// créditos fotográficos y letras capitulares que la maquetación coloca
+// como items independientes en el PDF y contaminarían el cuerpo.
+function esLineaRuido(texto: string): boolean {
+  const s = texto.trim();
+  if (!s) return true;
+  // Folio de página tipo "DM6", "AS12", "M3"
+  if (/^[A-Z]{1,3}\s?\d{1,4}$/.test(s)) return true;
+  // Firma de autor: "NOMBRE APELLIDO / CIUDAD" o "AS / MADRID"
+  if (/^[A-ZÁÉÍÓÚÑ0-9.·\- ]{2,}\s*\/\s*[A-ZÁÉÍÓÚÑ0-9.·\- ]{2,}$/.test(s)) return true;
+  // Créditos fotográficos: "PEPE ANDRES / DIARIO AS", "COMUNIDAD DE MADRID"
+  if (/DIARIO\s+(AS|MARCA|SPORT|SUPERDEPORTE)/i.test(s) && s.length < 60) return true;
+  // Todo en mayúsculas y corto -> antetítulo/kicker/sección
+  const letras = s.replace(/[^A-Za-zÁÉÍÓÚÑáéíóúñ]/g, "");
+  if (letras.length >= 2) {
+    const mays = letras.replace(/[^A-ZÁÉÍÓÚÑ]/g, "").length;
+    if (mays / letras.length > 0.85 && s.length < 80) return true;
+  }
+  return false;
+}
+
+// Nombre de sección corto ("Baloncesto", "hípica", "Madrid") sin puntuación.
+function esEtiquetaSeccion(texto: string): boolean {
+  const s = texto.trim();
+  if (s.length > 30) return false;
+  if (!/^[A-Za-zÁÉÍÓÚÑñáéíóú ]+$/.test(s)) return false;
+  return s.split(/\s+/).length <= 3;
+}
+
+
 // Limpia texto (OCR o nativo) eliminando caracteres extraños,
 // símbolos sueltos, guiones de fin de línea y espacios repetidos.
 function limpiarTexto(texto: string): string {
