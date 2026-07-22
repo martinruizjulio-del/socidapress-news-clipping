@@ -648,7 +648,7 @@ export default function SocidaPressApp() {
       titulo: metadata.titulo,
       fecha: metadata.fecha,
       hora: metadata.hora,
-      texto: finalTexts.map((t) => t.text).join("\n\n"),
+      bloques: finalTexts.map((t) => ({ titulo: t.titulo ?? "", texto: t.text })),
       imagenes: finalImages.map((i) => ({
         pagina: i.page,
         ancho: i.width,
