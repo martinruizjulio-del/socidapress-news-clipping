@@ -1,4 +1,4 @@
-import { type PointerEvent as ReactPointerEvent, useCallback, useMemo, useRef, useState } from "react";
+import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -8,7 +8,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
-import { Newspaper, FileUp, Download, RotateCcw, Loader2 } from "lucide-react";
+import { Newspaper, FileUp, Download, RotateCcw, Loader2, Library, Trash2, Save, ArrowLeft, Pencil } from "lucide-react";
+
 
 // Tipos internos
 interface ExtractedImage {
