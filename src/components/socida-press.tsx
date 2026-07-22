@@ -620,8 +620,8 @@ export default function SocidaPressApp() {
               tituloDetectado = tituloItems.map((x) => x.str).join(" ").replace(/\s+/g, " ").trim();
             }
           }
-        } catch {
-          // sin capa de texto -> nos apoyaremos en el OCR
+        } catch (err) {
+          console.log("DBG getTextContent ERROR page", p, err);
         }
 
 
