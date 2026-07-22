@@ -23,8 +23,11 @@ interface ExtractedTextBlock {
   id: string;
   page: number;
   titulo?: string;
+  fecha?: string;
+  hora?: string;
   text: string;
 }
+
 
 interface Metadata {
   periodico: string;
@@ -228,95 +231,165 @@ type NativeItem = {
   hasEOL: boolean;
 };
 
-// Convierte los items de pdf.js a bloques {titulo?, text} detectando cambios de
-// tamaño (subtítulos), párrafos por gaps verticales y columnas por gaps de X.
-function extraerBloquesNativos(items: NativeItem[]): { titulo?: string; text: string }[] {
+// Agrupa items del PDF en bloques de noticia. Cada noticia (delimitada por
+// un titular grande) forma UN bloque aunque su cuerpo esté maquetado en
+// varias columnas dentro del mismo recuadro. Devuelve además fecha y hora
+// detectadas dentro de cada bloque cuando aparecen.
+function extraerBloquesNativos(
+  items: NativeItem[],
+): { titulo?: string; text: string; fecha?: string; hora?: string }[] {
   if (!items.length) return [];
 
-  // Estimar tamaño mediana (cuerpo de texto)
   const sizes = items.map((i) => i.size).filter((s) => s > 0).sort((a, b) => a - b);
   const median = sizes[Math.floor(sizes.length / 2)] || 10;
 
-  // Agrupar items en líneas por columna (x aproximada) y por y
-  const sorted = [...items].sort((a, b) => {
-    // Ordena por columna aproximada (bloques de 100pt en X * escala 2 = 200)
-    const col = Math.floor(a.x / 200) - Math.floor(b.x / 200);
-    if (col !== 0) return col;
-    return b.y - a.y; // pdf.js: y crece hacia arriba
-  });
+  // 1) Construcción de líneas: recorremos los items en orden natural
+  //    (por y descendente, x ascendente) y unimos los que van seguidos en
+  //    la misma línea horizontal con el mismo tamaño de fuente.
+  type Linea = { x: number; xEnd: number; y: number; size: number; text: string };
+  const yTol = median * 0.5;
+  const ordenados = [...items]
+    .filter((i) => i.str.trim() || i.hasEOL)
+    .sort((a, b) => (b.y - a.y) || (a.x - b.x));
 
-  type Linea = { x: number; y: number; size: number; text: string };
   const lineas: Linea[] = [];
-  let cur: Linea | null = null;
-  const yTol = median * 0.6;
-  for (const it of sorted) {
+  for (const it of ordenados) {
     const str = it.str;
-    if (!str.trim() && !it.hasEOL) continue;
+    if (!str) continue;
+    const last = lineas[lineas.length - 1];
+    const anchoAprox = it.size * str.length * 0.5;
     if (
-      cur &&
-      Math.abs(cur.y - it.y) <= yTol &&
-      Math.abs(cur.size - it.size) < 0.5 &&
-      Math.floor(cur.x / 200) === Math.floor(it.x / 200)
+      last &&
+      Math.abs(last.y - it.y) <= yTol &&
+      Math.abs(last.size - it.size) < 1 &&
+      it.x >= last.xEnd - 5 &&
+      it.x <= last.xEnd + 50
     ) {
-      cur.text += (cur.text.endsWith(" ") || !str.startsWith(" ") ? "" : "") + str;
+      last.text += (last.text.endsWith(" ") || str.startsWith(" ") ? "" : " ") + str;
+      last.xEnd = it.x + anchoAprox;
     } else {
-      if (cur) lineas.push(cur);
-      cur = { x: it.x, y: it.y, size: it.size, text: str };
-    }
-    if (it.hasEOL) {
-      if (cur) lineas.push(cur);
-      cur = null;
+      lineas.push({ x: it.x, xEnd: it.x + anchoAprox, y: it.y, size: it.size, text: str });
     }
   }
-  if (cur) lineas.push(cur);
 
-  // Descartar líneas basura antes de agrupar
   const limpias = lineas
     .map((l) => ({ ...l, text: l.text.replace(/\s+/g, " ").trim() }))
     .filter((l) => l.text.length > 0);
 
-  // Recorremos líneas y agrupamos en bloques.
-  // - Una línea con size > median * 1.3 y pocas palabras => subtítulo (inicia bloque)
-  // - Gap vertical grande (> median * 2) entre líneas => nuevo párrafo/bloque
-  const bloques: { titulo?: string; text: string }[] = [];
-  let bloqueActual: { titulo?: string; text: string } | null = null;
-  let ultimaY: number | null = null;
-  let ultimaCol: number | null = null;
+  // 2) Identificar titulares (líneas con fuente notablemente mayor que la
+  //    mediana del cuerpo). Cada titular abre una nueva noticia.
+  const esHeadline = (l: Linea) =>
+    l.size >= median * 1.6 &&
+    l.text.length < 200 &&
+    l.text.split(/\s+/).length <= 20 &&
+    !/^\d+$/.test(l.text);
 
-  const pushBloque = () => {
-    if (bloqueActual) {
-      const limpio = limpiarTexto(bloqueActual.text);
-      if (limpio.length > 40 && !esRuidoMaquetacion(limpio)) {
-        bloques.push({ titulo: bloqueActual.titulo, text: limpio });
-      }
-      bloqueActual = null;
-    }
-  };
+  const headlineLines = limpias.filter(esHeadline).sort((a, b) => b.y - a.y);
 
-  for (const l of limpias) {
-    const col = Math.floor(l.x / 200);
-    const esSubtitulo =
-      l.size >= median * 1.3 && l.text.split(/\s+/).length <= 14 && l.text.length < 120;
-    const gap = ultimaY !== null ? Math.abs(ultimaY - l.y) : 0;
-    const nuevoBloque =
-      esSubtitulo ||
-      !bloqueActual ||
-      (ultimaCol !== null && ultimaCol !== col) ||
-      gap > median * 2.2;
-
-    if (nuevoBloque) {
-      pushBloque();
-      bloqueActual = { titulo: esSubtitulo ? l.text : undefined, text: esSubtitulo ? "" : l.text };
+  // Titulares consecutivos (misma noticia con antetítulo/subtítulo/titular
+  // en varias líneas) se fusionan en un único artículo.
+  type Articulo = { headlineY: number; headlineSize: number; titulo: string };
+  const articulos: Articulo[] = [];
+  for (const h of headlineLines) {
+    const last = articulos[articulos.length - 1];
+    if (
+      last &&
+      Math.abs(last.headlineY - h.y) < median * 3.5 &&
+      Math.abs(last.headlineSize - h.size) < h.size * 0.4
+    ) {
+      last.titulo = `${last.titulo} ${h.text}`.trim();
+      last.headlineY = Math.min(last.headlineY, h.y);
     } else {
-      bloqueActual!.text += (bloqueActual!.text ? " " : "") + l.text;
+      articulos.push({ headlineY: h.y, headlineSize: h.size, titulo: h.text });
     }
-    ultimaY = l.y;
-    ultimaCol = col;
   }
-  pushBloque();
+
+  // Si no hay titulares detectados, tratamos toda la página como un bloque
+  // (por ejemplo páginas con solo cuerpo). Se conservan las líneas ordenadas.
+  if (articulos.length === 0) {
+    const raw = limpias
+      .sort((a, b) => (b.y - a.y) || (a.x - b.x))
+      .map((l) => l.text)
+      .join("\n");
+    const limpio = limpiarTexto(raw);
+    if (limpio.length > 40 && !esRuidoMaquetacion(limpio)) {
+      const meta = extraerMetadatos(limpio, "");
+      return [{ text: limpio, fecha: meta.fecha || undefined, hora: meta.hora || undefined }];
+    }
+    return [];
+  }
+
+  // 3) Asignar cada línea de cuerpo a la noticia cuyo titular esté justo
+  //    encima (mayor y, pero por encima de la línea). Esto permite que
+  //    varias columnas del mismo recuadro pertenezcan al mismo bloque.
+  const cuerpos: Linea[][] = articulos.map(() => []);
+  const sueltas: Linea[] = [];
+  for (const l of limpias) {
+    if (esHeadline(l)) continue;
+    let mejor = -1;
+    let mejorDy = Infinity;
+    for (let i = 0; i < articulos.length; i++) {
+      const hy = articulos[i].headlineY;
+      // La línea de cuerpo debe estar por debajo (o casi) del titular.
+      if (hy >= l.y - median * 0.5) {
+        const dy = hy - l.y;
+        if (dy < mejorDy) {
+          mejorDy = dy;
+          mejor = i;
+        }
+      }
+    }
+    if (mejor >= 0) cuerpos[mejor].push(l);
+    else sueltas.push(l);
+  }
+
+  // 4) Componer cada bloque respetando el orden de lectura: columnas de
+  //    izquierda a derecha, y dentro de cada columna de arriba abajo.
+  const bloques: { titulo?: string; text: string; fecha?: string; hora?: string }[] = [];
+  const anchoColumna = median * 12; // ~12 caracteres = ancho típico de columna
+  for (let i = 0; i < articulos.length; i++) {
+    const art = articulos[i];
+    const lineasCuerpo = cuerpos[i];
+    if (!lineasCuerpo.length) continue;
+    lineasCuerpo.sort((a, b) => {
+      const ca = Math.floor(a.x / anchoColumna);
+      const cb = Math.floor(b.x / anchoColumna);
+      if (ca !== cb) return ca - cb;
+      return b.y - a.y;
+    });
+    const raw = lineasCuerpo.map((l) => l.text).join("\n");
+    const limpio = limpiarTexto(raw);
+    if (limpio.length < 40 || esRuidoMaquetacion(limpio)) continue;
+    const meta = extraerMetadatos(`${limpio}\n${art.titulo}`, "");
+    bloques.push({
+      titulo: art.titulo.replace(/\s+/g, " ").trim(),
+      text: limpio,
+      fecha: meta.fecha || undefined,
+      hora: meta.hora || undefined,
+    });
+  }
+
+  // Líneas huérfanas (por encima de todos los titulares): las agrupamos
+  // como un bloque adicional solo si suman contenido relevante.
+  if (sueltas.length > 5) {
+    const raw = sueltas
+      .sort((a, b) => (b.y - a.y) || (a.x - b.x))
+      .map((l) => l.text)
+      .join("\n");
+    const limpio = limpiarTexto(raw);
+    if (limpio.length > 80 && !esRuidoMaquetacion(limpio)) {
+      const meta = extraerMetadatos(limpio, "");
+      bloques.push({
+        text: limpio,
+        fecha: meta.fecha || undefined,
+        hora: meta.hora || undefined,
+      });
+    }
+  }
 
   return bloques;
 }
+
 
 
 
@@ -526,9 +599,12 @@ export default function SocidaPressApp() {
               id: `txt-${page}-${i}`,
               page,
               titulo: b.titulo,
+              fecha: b.fecha,
+              hora: b.hora,
               text: b.text,
             });
           });
+
         } else {
           paginasSinTexto.push({ page, canvas });
         }
@@ -648,7 +724,13 @@ export default function SocidaPressApp() {
       titulo: metadata.titulo,
       fecha: metadata.fecha,
       hora: metadata.hora,
-      bloques: finalTexts.map((t) => ({ titulo: t.titulo ?? "", texto: t.text })),
+      bloques: finalTexts.map((t) => ({
+        titulo: t.titulo ?? "",
+        fecha: t.fecha ?? "",
+        hora: t.hora ?? "",
+        texto: t.text,
+      })),
+
       imagenes: finalImages.map((i) => ({
         pagina: i.page,
         ancho: i.width,
@@ -899,6 +981,35 @@ export default function SocidaPressApp() {
                             }}
                             className="font-semibold"
                           />
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            <Input
+                              type="text"
+                              value={b.fecha ?? ""}
+                              placeholder="Fecha (opcional)"
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                setTextBlocks((prev) =>
+                                  prev.map((x) =>
+                                    x.id === b.id ? { ...x, fecha: v } : x,
+                                  ),
+                                );
+                              }}
+                            />
+                            <Input
+                              type="text"
+                              value={b.hora ?? ""}
+                              placeholder="Hora (opcional)"
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                setTextBlocks((prev) =>
+                                  prev.map((x) =>
+                                    x.id === b.id ? { ...x, hora: v } : x,
+                                  ),
+                                );
+                              }}
+                            />
+                          </div>
+
                           <Textarea
                             value={b.text}
                             onChange={(e) => {
