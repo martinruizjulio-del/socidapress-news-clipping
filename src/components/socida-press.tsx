@@ -412,9 +412,9 @@ export default function SocidaPressApp() {
         if (!raw) continue;
         const chunks = raw
           .split(/\n\s*\n+/g)
-          .map((s) => s.replace(/\s+\n/g, "\n").trim())
+          .map((s) => limpiarTexto(s))
           // Filtramos elementos de maquetación: firmas, cabeceras, pies…
-          .filter((s) => !esRuidoMaquetacion(s));
+          .filter((s) => s.length > 0 && !esRuidoMaquetacion(s));
         chunks.forEach((c, i) => {
           blocks.push({ id: `txt-${page}-${i}`, page, text: c });
         });
@@ -429,10 +429,17 @@ export default function SocidaPressApp() {
         `${nativeFull}\n${ocrFull}`,
         tituloDetectado,
       );
-      // Fallback: si no encontramos fecha/hora, usamos las actuales
-      if (!meta.fecha) meta.fecha = new Date().toISOString().slice(0, 10);
-      if (!meta.hora) meta.hora = new Date().toTimeString().slice(0, 5);
+      // Si no se detecta fecha, la dejamos "por determinar".
+      // Si no se detecta hora pero sí fecha, usamos la hora actual;
+      // si tampoco hay fecha, la hora queda "por determinar".
+      if (!meta.fecha) {
+        meta.fecha = "por determinar";
+        if (!meta.hora) meta.hora = "por determinar";
+      } else if (!meta.hora) {
+        meta.hora = new Date().toTimeString().slice(0, 5);
+      }
       setMetadata(meta);
+
 
 
       setProgress(100);
