@@ -338,23 +338,33 @@ function extraerBloquesNativos(
   }
 
   // Detecta letras capitulares (drop caps): un solo carácter con tamaño
-  // enorme. Antes de descartarlas, las fusionamos con la línea contigua
-  // a su derecha para no perder la primera letra del cuerpo ("D" + "el 19…").
+  // notablemente mayor al cuerpo. Antes de descartarlas, las fusionamos
+  // con la línea contigua a su derecha para no perder la primera letra
+  // del cuerpo ("D" + "el 19…"). Aceptamos hasta 3 caracteres por si el
+  // OCR/parser mezcla la capitular con la siguiente ("De" o "Del").
   const capitulares = lineas.filter(
-    (l) => l.text.trim().length <= 2 && l.size >= median * 2.5,
+    (l) => l.text.trim().length <= 3 && l.size >= median * 1.9,
   );
   const capSet = new Set(capitulares);
   for (const dc of capitulares) {
     const letra = dc.text.trim();
-    const destino = lineas.find(
-      (l) =>
-        !capSet.has(l) &&
-        l.x >= dc.x - 5 &&
-        l.x <= dc.xEnd + dc.size * 2 &&
-        Math.abs(l.y - dc.y) < dc.size,
-    );
+    // Candidatas: líneas de cuerpo a la derecha de la capitular y dentro
+    // de su altura vertical (la capitular ocupa varias líneas de cuerpo).
+    const candidatas = lineas
+      .filter(
+        (l) =>
+          !capSet.has(l) &&
+          l.x >= dc.xEnd - dc.size * 0.4 &&
+          l.x <= dc.xEnd + dc.size * 2.5 &&
+          l.y <= dc.y + dc.size * 0.6 &&
+          l.y >= dc.y - dc.size * 2.5,
+      )
+      // La primera línea del párrafo es la más alta (mayor y en pdfjs).
+      .sort((a, b) => b.y - a.y);
+    const destino = candidatas[0];
     if (destino) destino.text = letra + destino.text;
   }
+
 
   const limpias = lineas
     .filter((l) => !capSet.has(l))
