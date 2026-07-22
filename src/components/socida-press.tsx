@@ -1310,14 +1310,35 @@ export default function SocidaPressApp() {
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary text-primary-foreground">
             <Newspaper className="h-5 w-5" />
           </div>
-          <div>
+          <div className="flex-1">
             <h1 className="text-xl font-bold tracking-tight">SocidaPress</h1>
             <p className="text-xs text-muted-foreground">
               Importa noticias en PDF, extrae imágenes y texto por OCR
             </p>
           </div>
+          <Button
+            variant={stage === "library" ? "default" : "outline"}
+            size="sm"
+            onClick={openLibrary}
+            className="gap-2"
+          >
+            <Library className="h-4 w-4" />
+            Biblioteca
+            {saved.length > 0 && (
+              <span className="ml-1 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium">
+                {saved.length}
+              </span>
+            )}
+          </Button>
+          {stage !== "form" && stage !== "library" && (
+            <Button variant="ghost" size="sm" onClick={handleReset} className="gap-2">
+              <RotateCcw className="h-4 w-4" />
+              Nueva
+            </Button>
+          )}
         </div>
       </header>
+
 
       <main className="mx-auto max-w-5xl px-6 py-8">
         {stage === "form" && (
