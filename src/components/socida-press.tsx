@@ -839,9 +839,9 @@ export default function SocidaPressApp() {
       //    que no tengan capa de texto.
       const blocks: ExtractedTextBlock[] = [];
       const pagesText: { page: number; text: string }[] = [];
-      const paginasSinTexto: { page: number; canvas: HTMLCanvasElement }[] = [];
+      const paginasSinTexto: { page: number; canvas: HTMLCanvasElement; rectPx?: { x: number; y: number; w: number; h: number } }[] = [];
 
-      for (const { page, canvas } of pageCanvases) {
+      for (const { page, canvas, rectPx } of pageCanvases) {
         const nativa = nativePageItems.find((n) => n.page === page);
         if (nativa && nativa.items.length > 20) {
           const bloques = extraerBloquesNativos(nativa.items);
@@ -857,7 +857,7 @@ export default function SocidaPressApp() {
           });
 
         } else {
-          paginasSinTexto.push({ page, canvas });
+          paginasSinTexto.push({ page, canvas, rectPx });
         }
       }
 
@@ -867,10 +867,23 @@ export default function SocidaPressApp() {
         const tesseract = await import("tesseract.js");
         const worker = await tesseract.createWorker("spa", 1);
         for (let idx = 0; idx < paginasSinTexto.length; idx++) {
-          const { page, canvas } = paginasSinTexto[idx];
+          const { page, canvas, rectPx } = paginasSinTexto[idx];
           setProgressLabel(`OCR página ${page} de ${numPages}…`);
           setProgress(50 + Math.round(((idx + 1) / paginasSinTexto.length) * 48));
-          const { data } = await worker.recognize(canvas);
+          // Si hay zona marcada, recortamos el canvas para pasar sólo el
+          // rectángulo al OCR (más rápido y sin ruido de otras noticias).
+          let src: HTMLCanvasElement = canvas;
+          if (rectPx && rectPx.w > 20 && rectPx.h > 20) {
+            const c = document.createElement("canvas");
+            c.width = Math.round(rectPx.w);
+            c.height = Math.round(rectPx.h);
+            const cctx = c.getContext("2d");
+            if (cctx) {
+              cctx.drawImage(canvas, rectPx.x, rectPx.y, rectPx.w, rectPx.h, 0, 0, c.width, c.height);
+              src = c;
+            }
+          }
+          const { data } = await worker.recognize(src);
           const raw = (data.text || "").trim();
           pagesText.push({ page, text: raw });
           if (!raw) continue;
