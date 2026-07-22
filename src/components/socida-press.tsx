@@ -974,6 +974,25 @@ export default function SocidaPressApp() {
         }
       }
 
+      // Guardamos, por página, la imagen completa y (si hay zona marcada) el
+      // recorte, para poder acompañar cada bloque con su prueba visual.
+      const pageImgs: PageImage[] = pageCanvases.map(({ page, canvas, rectPx }) => {
+        const fullDataUrl = canvas.toDataURL("image/webp", 0.85);
+        let cropDataUrl: string | undefined;
+        if (rectPx && rectPx.w > 20 && rectPx.h > 20) {
+          const c = document.createElement("canvas");
+          c.width = Math.round(rectPx.w);
+          c.height = Math.round(rectPx.h);
+          const cctx = c.getContext("2d");
+          if (cctx) {
+            cctx.drawImage(canvas, rectPx.x, rectPx.y, rectPx.w, rectPx.h, 0, 0, c.width, c.height);
+            cropDataUrl = c.toDataURL("image/webp", 0.85);
+          }
+        }
+        return { page, fullDataUrl, cropDataUrl };
+      });
+      setPageImages(pageImgs);
+
       // 2) Construir bloques: preferimos texto nativo del PDF (limpio y con
       //    subtítulos por tamaño de fuente). Solo pasamos por OCR las páginas
       //    que no tengan capa de texto.
