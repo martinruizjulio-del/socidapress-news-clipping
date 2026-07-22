@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { type PointerEvent as ReactPointerEvent, useCallback, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -36,7 +36,21 @@ interface Metadata {
   hora: string;
 }
 
-type Stage = "form" | "processing" | "select" | "done";
+type Stage = "form" | "region" | "processing" | "select" | "done";
+
+// Rectángulo de recorte en coordenadas de usuario del PDF (mismo espacio que
+// los items de texto nativos y el viewBox de pdfjs).
+type PdfRect = { xMin: number; xMax: number; yMin: number; yMax: number };
+
+// Miniatura de página + info de viewport necesaria para mapear coordenadas
+// pantalla <-> PDF y aplicar el recorte durante el procesado.
+interface PageThumb {
+  page: number;
+  dataUrl: string;
+  canvasWidth: number;
+  canvasHeight: number;
+  viewBox: [number, number, number, number];
+}
 
 // Convierte un ImageData / canvas a dataURL webp
 function canvasToWebp(canvas: HTMLCanvasElement): string {
@@ -513,24 +527,137 @@ function extraerBloquesNativos(
     });
   }
 
+// Selector de zona sobre la miniatura de una página. Convierte las
+// coordenadas del ratón (en píxeles del <img>) a coordenadas de usuario del
+// PDF (mismo espacio que los items nativos), para que el filtrado sea preciso
+// sea cual sea el tamaño al que se muestre la miniatura.
+function RegionPicker({
+  thumb,
+  rect,
+  onChange,
+}: {
+  thumb: PageThumb;
+  rect: PdfRect | undefined;
+  onChange: (rect: PdfRect | undefined) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
-  // Líneas huérfanas (por encima de todos los titulares): las agrupamos
-  // como un bloque adicional solo si suman contenido relevante.
-  if (sueltas.length > 5) {
-    const raw = sueltas
-      .sort((a, b) => (b.y - a.y) || (a.x - b.x))
-      .map((l) => l.text)
-      .join("\n");
-    const limpio = limpiarTexto(raw);
-    if (limpio.length > 80 && !esRuidoMaquetacion(limpio)) {
-      const meta = extraerMetadatos(limpio, "");
-      bloques.push({
-        text: limpio,
-        fecha: meta.fecha || undefined,
-        hora: meta.hora || undefined,
-      });
+  const [vx0, vy0, vx1, vy1] = thumb.viewBox;
+  const pdfW = vx1 - vx0;
+  const pdfH = vy1 - vy0;
+
+  const toPdf = (px: number, py: number, w: number, h: number): { x: number; y: number } => ({
+    x: vx0 + (px / w) * pdfW,
+    y: vy1 - (py / h) * pdfH,
+  });
+
+  const toPct = (r: PdfRect) => ({
+    left: `${((r.xMin - vx0) / pdfW) * 100}%`,
+    top: `${((vy1 - r.yMax) / pdfH) * 100}%`,
+    width: `${((r.xMax - r.xMin) / pdfW) * 100}%`,
+    height: `${((r.yMax - r.yMin) / pdfH) * 100}%`,
+  });
+
+  const onDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.setPointerCapture(e.pointerId);
+    const b = el.getBoundingClientRect();
+    const x = e.clientX - b.left;
+    const y = e.clientY - b.top;
+    setDrag({ x0: x, y0: y, x1: x, y1: y });
+  };
+  const onMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!drag) return;
+    const el = containerRef.current;
+    if (!el) return;
+    const b = el.getBoundingClientRect();
+    setDrag({ ...drag, x1: e.clientX - b.left, y1: e.clientY - b.top });
+  };
+  const onUp = () => {
+    if (!drag) return;
+    const el = containerRef.current;
+    if (!el) {
+      setDrag(null);
+      return;
     }
-  }
+    const b = el.getBoundingClientRect();
+    const x0 = Math.max(0, Math.min(drag.x0, drag.x1));
+    const y0 = Math.max(0, Math.min(drag.y0, drag.y1));
+    const x1 = Math.min(b.width, Math.max(drag.x0, drag.x1));
+    const y1 = Math.min(b.height, Math.max(drag.y0, drag.y1));
+    setDrag(null);
+    if (x1 - x0 < 10 || y1 - y0 < 10) return;
+    const a = toPdf(x0, y0, b.width, b.height);
+    const c = toPdf(x1, y1, b.width, b.height);
+    onChange({
+      xMin: Math.min(a.x, c.x),
+      xMax: Math.max(a.x, c.x),
+      yMin: Math.min(a.y, c.y),
+      yMax: Math.max(a.y, c.y),
+    });
+  };
+
+  const overlay = drag
+    ? {
+        left: Math.min(drag.x0, drag.x1),
+        top: Math.min(drag.y0, drag.y1),
+        width: Math.abs(drag.x1 - drag.x0),
+        height: Math.abs(drag.y1 - drag.y0),
+      }
+    : null;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-medium">Página {thumb.page}</p>
+        {rect && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => onChange(undefined)}
+          >
+            Limpiar zona
+          </Button>
+        )}
+      </div>
+      <div
+        ref={containerRef}
+        onPointerDown={onDown}
+        onPointerMove={onMove}
+        onPointerUp={onUp}
+        className="relative inline-block max-w-full cursor-crosshair select-none rounded border bg-muted"
+        style={{ touchAction: "none" }}
+      >
+        <img
+          src={thumb.dataUrl}
+          alt={`Página ${thumb.page}`}
+          className="block max-w-full h-auto pointer-events-none"
+          draggable={false}
+          loading="lazy"
+        />
+        {rect && !drag && (
+          <div
+            className="pointer-events-none absolute border-2 border-primary bg-primary/15"
+            style={toPct(rect)}
+          />
+        )}
+        {overlay && (
+          <div
+            className="pointer-events-none absolute border-2 border-primary/70 bg-primary/10"
+            style={overlay}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+
+
+
 
   return bloques;
 }
@@ -553,6 +680,9 @@ export default function SocidaPressApp() {
   const [textBlocks, setTextBlocks] = useState<ExtractedTextBlock[]>([]);
   const [selectedImgIds, setSelectedImgIds] = useState<Set<string>>(new Set());
   const [selectedTextIds, setSelectedTextIds] = useState<Set<string>>(new Set());
+  const [thumbs, setThumbs] = useState<PageThumb[]>([]);
+  const [regions, setRegions] = useState<Record<number, PdfRect>>({});
+  const pdfRef = useRef<unknown>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleReset = () => {
@@ -565,8 +695,58 @@ export default function SocidaPressApp() {
     setMetadata({ periodico: "", titulo: "", fecha: "", hora: "" });
     setProgress(0);
     setProgressLabel("");
+    setThumbs([]);
+    setRegions({});
+    pdfRef.current = null;
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
+
+  // Carga el PDF, genera miniaturas y lleva al paso de selección de zona.
+  const loadPdfForRegion = useCallback(async () => {
+    if (!file) return;
+    setStage("processing");
+    setProgress(5);
+    setProgressLabel("Cargando PDF…");
+    try {
+      const pdfjs = await import("pdfjs-dist");
+      const workerUrl = (await import("pdfjs-dist/build/pdf.worker.min.mjs?url"))
+        .default;
+      pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+      const buf = await file.arrayBuffer();
+      const pdf = await pdfjs.getDocument({ data: buf }).promise;
+      pdfRef.current = pdf;
+      const nuevas: PageThumb[] = [];
+      for (let p = 1; p <= pdf.numPages; p++) {
+        setProgressLabel(`Preparando página ${p} de ${pdf.numPages}…`);
+        setProgress(10 + Math.round((p / pdf.numPages) * 80));
+        const page = await pdf.getPage(p);
+        const vp = page.getViewport({ scale: 1.3 });
+        const canvas = document.createElement("canvas");
+        canvas.width = vp.width;
+        canvas.height = vp.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) continue;
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        nuevas.push({
+          page: p,
+          dataUrl: canvas.toDataURL("image/webp", 0.85),
+          canvasWidth: vp.width,
+          canvasHeight: vp.height,
+          viewBox: vp.viewBox as [number, number, number, number],
+        });
+      }
+      setThumbs(nuevas);
+      setRegions({});
+      setProgress(100);
+      setStage("region");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Error desconocido";
+      toast.error(`No se ha podido cargar el PDF: ${msg}`);
+      setStage("form");
+    }
+  }, [file]);
+
+
 
   const processPdf = useCallback(async () => {
     if (!file) return;
@@ -581,12 +761,19 @@ export default function SocidaPressApp() {
       pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
       setProgressLabel("Leyendo PDF…");
-      const buf = await file.arrayBuffer();
-      const pdf = await pdfjs.getDocument({ data: buf }).promise;
+      // Reutilizamos el documento ya cargado en el paso de "zona" si existe.
+      type PdfDocLike = {
+        numPages: number;
+        getPage: (n: number) => Promise<unknown>;
+      };
+      const pdf: PdfDocLike =
+        (pdfRef.current as PdfDocLike | null) ??
+        (await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise);
+      pdfRef.current = pdf;
       const numPages = pdf.numPages;
 
       const foundImages: ExtractedImage[] = [];
-      const pageCanvases: { page: number; canvas: HTMLCanvasElement }[] = [];
+      const pageCanvases: { page: number; canvas: HTMLCanvasElement; rectPx?: { x: number; y: number; w: number; h: number } }[] = [];
       const nativePageTexts: { page: number; text: string }[] = [];
       const nativePageItems: { page: number; items: NativeItem[] }[] = [];
       let tituloDetectado = "";
@@ -597,7 +784,17 @@ export default function SocidaPressApp() {
         setProgressLabel(`Analizando página ${p} de ${numPages}…`);
         setProgress(5 + Math.round(((p - 1) / numPages) * 40));
 
-        const page = await pdf.getPage(p);
+        const page = (await pdf.getPage(p)) as {
+          getViewport: (o: { scale: number }) => {
+            width: number;
+            height: number;
+            viewBox: number[];
+          };
+          render: (o: { canvasContext: CanvasRenderingContext2D; viewport: unknown }) => { promise: Promise<void> };
+          getTextContent: () => Promise<{ items: unknown[] }>;
+          getOperatorList: () => Promise<{ fnArray: number[]; argsArray: unknown[][] }>;
+          objs: { get: (n: string, cb: (o: unknown) => void) => void };
+        };
         const viewport = page.getViewport({ scale: 2 });
         const canvas = document.createElement("canvas");
         canvas.width = viewport.width;
@@ -605,7 +802,27 @@ export default function SocidaPressApp() {
         const ctx = canvas.getContext("2d");
         if (!ctx) continue;
         await page.render({ canvasContext: ctx, viewport }).promise;
-        pageCanvases.push({ page: p, canvas });
+
+        // Si el usuario ha marcado una zona para esta página, calculamos el
+        // rectángulo equivalente en píxeles del canvas para poder recortar
+        // el OCR más adelante.
+        const rectPdf = regions[p];
+        let rectPx: { x: number; y: number; w: number; h: number } | undefined;
+        if (rectPdf) {
+          const [vx0, vy0, vx1, vy1] = viewport.viewBox as [number, number, number, number];
+          const pdfW = vx1 - vx0;
+          const pdfH = vy1 - vy0;
+          const sx = canvas.width / pdfW;
+          const sy = canvas.height / pdfH;
+          const x = (rectPdf.xMin - vx0) * sx;
+          const w = (rectPdf.xMax - rectPdf.xMin) * sx;
+          // Coordenada Y del PDF es ascendente; en canvas es descendente.
+          const y = (vy1 - rectPdf.yMax) * sy;
+          const h = (rectPdf.yMax - rectPdf.yMin) * sy;
+          rectPx = { x, y, w, h };
+        }
+        pageCanvases.push({ page: p, canvas, rectPx });
+
 
         // Extraer texto nativo del PDF (mucho más fiable que OCR).
         try {
@@ -624,7 +841,19 @@ export default function SocidaPressApp() {
               hasEOL: !!it.hasEOL,
             };
           });
-          nativePageItems.push({ page: p, items: nItems });
+          // Si hay zona marcada para esta página, nos quedamos sólo con los
+          // items cuyo origen cae dentro del rectángulo definido por el usuario.
+          const rectPdf = regions[p];
+          const nItemsFiltrados = rectPdf
+            ? nItems.filter(
+                (it) =>
+                  it.x >= rectPdf.xMin &&
+                  it.x <= rectPdf.xMax &&
+                  it.y >= rectPdf.yMin &&
+                  it.y <= rectPdf.yMax,
+              )
+            : nItems;
+          nativePageItems.push({ page: p, items: nItemsFiltrados });
 
 
 
@@ -666,7 +895,7 @@ export default function SocidaPressApp() {
               fn === OPS.paintInlineImageXObject
             ) {
               const args = opList.argsArray[i];
-              const name = args?.[0];
+              const name = args?.[0] as string | undefined;
               if (!name || seen.has(name)) continue;
               seen.add(name);
               try {
@@ -738,9 +967,9 @@ export default function SocidaPressApp() {
       //    que no tengan capa de texto.
       const blocks: ExtractedTextBlock[] = [];
       const pagesText: { page: number; text: string }[] = [];
-      const paginasSinTexto: { page: number; canvas: HTMLCanvasElement }[] = [];
+      const paginasSinTexto: { page: number; canvas: HTMLCanvasElement; rectPx?: { x: number; y: number; w: number; h: number } }[] = [];
 
-      for (const { page, canvas } of pageCanvases) {
+      for (const { page, canvas, rectPx } of pageCanvases) {
         const nativa = nativePageItems.find((n) => n.page === page);
         if (nativa && nativa.items.length > 20) {
           const bloques = extraerBloquesNativos(nativa.items);
@@ -756,7 +985,7 @@ export default function SocidaPressApp() {
           });
 
         } else {
-          paginasSinTexto.push({ page, canvas });
+          paginasSinTexto.push({ page, canvas, rectPx });
         }
       }
 
@@ -766,10 +995,23 @@ export default function SocidaPressApp() {
         const tesseract = await import("tesseract.js");
         const worker = await tesseract.createWorker("spa", 1);
         for (let idx = 0; idx < paginasSinTexto.length; idx++) {
-          const { page, canvas } = paginasSinTexto[idx];
+          const { page, canvas, rectPx } = paginasSinTexto[idx];
           setProgressLabel(`OCR página ${page} de ${numPages}…`);
           setProgress(50 + Math.round(((idx + 1) / paginasSinTexto.length) * 48));
-          const { data } = await worker.recognize(canvas);
+          // Si hay zona marcada, recortamos el canvas para pasar sólo el
+          // rectángulo al OCR (más rápido y sin ruido de otras noticias).
+          let src: HTMLCanvasElement = canvas;
+          if (rectPx && rectPx.w > 20 && rectPx.h > 20) {
+            const c = document.createElement("canvas");
+            c.width = Math.round(rectPx.w);
+            c.height = Math.round(rectPx.h);
+            const cctx = c.getContext("2d");
+            if (cctx) {
+              cctx.drawImage(canvas, rectPx.x, rectPx.y, rectPx.w, rectPx.h, 0, 0, c.width, c.height);
+              src = c;
+            }
+          }
+          const { data } = await worker.recognize(src);
           const raw = (data.text || "").trim();
           pagesText.push({ page, text: raw });
           if (!raw) continue;
@@ -825,7 +1067,7 @@ export default function SocidaPressApp() {
       toast.error(`Error procesando el PDF: ${msg}`);
       setStage("form");
     }
-  }, [file]);
+  }, [file, regions]);
 
   const toggleImg = (id: string) => {
     setSelectedImgIds((prev) => {
@@ -940,26 +1182,66 @@ export default function SocidaPressApp() {
                   </p>
                 )}
                 <p className="text-xs text-muted-foreground">
-                  Sube el PDF y SocidaPress intentará detectar automáticamente
-                  el periódico, el título, la fecha y la hora. Podrás revisarlos
-                  después.
+                  Sube el PDF y en el siguiente paso podrás marcar sobre cada
+                  página la zona exacta que quieres escanear (opcional). Después
+                  SocidaPress detectará automáticamente el periódico, el título,
+                  la fecha y la hora.
                 </p>
               </div>
 
               <div className="flex justify-end">
                 <Button
-                  onClick={processPdf}
+                  onClick={loadPdfForRegion}
                   disabled={!file}
                   size="lg"
                   className="gap-2"
                 >
                   <FileUp className="h-4 w-4" />
-                  Procesar PDF
+                  Continuar
                 </Button>
               </div>
             </CardContent>
           </Card>
         )}
+
+        {stage === "region" && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Marca la zona a escanear</CardTitle>
+              <p className="text-sm text-muted-foreground">
+                Arrastra con el ratón sobre cada página para seleccionar la
+                zona que quieres importar. Si dejas una página sin marcar, se
+                escaneará completa.
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {thumbs.map((t) => (
+                <RegionPicker
+                  key={t.page}
+                  thumb={t}
+                  rect={regions[t.page]}
+                  onChange={(rect) =>
+                    setRegions((prev) => {
+                      const n = { ...prev };
+                      if (rect) n[t.page] = rect;
+                      else delete n[t.page];
+                      return n;
+                    })
+                  }
+                />
+              ))}
+              <div className="flex justify-between">
+                <Button variant="outline" onClick={handleReset} className="gap-2">
+                  <RotateCcw className="h-4 w-4" /> Volver
+                </Button>
+                <Button onClick={processPdf} size="lg" className="gap-2">
+                  <FileUp className="h-4 w-4" /> Procesar
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
 
         {stage === "processing" && (
           <Card>
