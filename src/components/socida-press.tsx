@@ -370,6 +370,7 @@ export default function SocidaPressApp() {
       const foundImages: ExtractedImage[] = [];
       const pageCanvases: { page: number; canvas: HTMLCanvasElement }[] = [];
       const nativePageTexts: { page: number; text: string }[] = [];
+      const nativePageItems: { page: number; items: NativeItem[] }[] = [];
       let tituloDetectado = "";
 
 
@@ -388,28 +389,36 @@ export default function SocidaPressApp() {
         await page.render({ canvasContext: ctx, viewport, canvas }).promise;
         pageCanvases.push({ page: p, canvas });
 
-        // Extraer texto nativo del PDF (mucho más fiable que OCR para
-        // detectar cabecera, fecha y título por tamaño de fuente).
+        // Extraer texto nativo del PDF (mucho más fiable que OCR).
         try {
           const tc = await page.getTextContent();
           type TItem = { str: string; height?: number; transform?: number[]; hasEOL?: boolean };
-          const items = (tc.items as unknown[]).filter(
+          const rawItems = (tc.items as unknown[]).filter(
             (it): it is TItem => !!it && typeof (it as TItem).str === "string",
           );
-          const pageStr = items
+          const nItems: NativeItem[] = rawItems.map((it) => {
+            const tr = it.transform || [0, 0, 0, 0, 0, 0];
+            return {
+              str: it.str,
+              x: tr[4] || 0,
+              y: tr[5] || 0,
+              size: it.height ?? Math.abs(tr[3] || 0),
+              hasEOL: !!it.hasEOL,
+            };
+          });
+          nativePageItems.push({ page: p, items: nItems });
+
+          const pageStr = rawItems
             .map((it) => it.str + (it.hasEOL ? "\n" : " "))
             .join("")
             .replace(/[ \t]+\n/g, "\n")
             .trim();
           nativePageTexts.push({ page: p, text: pageStr });
 
-          if (p === 1) {
-            // Título: buscamos los items con mayor altura de fuente
-            const withSize = items
-              .map((it) => ({
-                str: it.str.trim(),
-                size: it.height ?? (it.transform ? Math.abs(it.transform[3]) : 0),
-              }))
+          if (p === 1 && nItems.length) {
+            // Título: los items con mayor altura de fuente
+            const withSize = nItems
+              .map((it) => ({ str: it.str.trim(), size: it.size }))
               .filter((x) => x.str.length > 0);
             if (withSize.length) {
               const maxSize = withSize.reduce((m, x) => Math.max(m, x.size), 0);
