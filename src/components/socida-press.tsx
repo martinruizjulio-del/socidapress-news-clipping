@@ -567,8 +567,58 @@ export default function SocidaPressApp() {
     setMetadata({ periodico: "", titulo: "", fecha: "", hora: "" });
     setProgress(0);
     setProgressLabel("");
+    setThumbs([]);
+    setRegions({});
+    pdfRef.current = null;
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
+
+  // Carga el PDF, genera miniaturas y lleva al paso de selección de zona.
+  const loadPdfForRegion = useCallback(async () => {
+    if (!file) return;
+    setStage("processing");
+    setProgress(5);
+    setProgressLabel("Cargando PDF…");
+    try {
+      const pdfjs = await import("pdfjs-dist");
+      const workerUrl = (await import("pdfjs-dist/build/pdf.worker.min.mjs?url"))
+        .default;
+      pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+      const buf = await file.arrayBuffer();
+      const pdf = await pdfjs.getDocument({ data: buf }).promise;
+      pdfRef.current = pdf;
+      const nuevas: PageThumb[] = [];
+      for (let p = 1; p <= pdf.numPages; p++) {
+        setProgressLabel(`Preparando página ${p} de ${pdf.numPages}…`);
+        setProgress(10 + Math.round((p / pdf.numPages) * 80));
+        const page = await pdf.getPage(p);
+        const vp = page.getViewport({ scale: 1.3 });
+        const canvas = document.createElement("canvas");
+        canvas.width = vp.width;
+        canvas.height = vp.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) continue;
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        nuevas.push({
+          page: p,
+          dataUrl: canvas.toDataURL("image/webp", 0.85),
+          canvasWidth: vp.width,
+          canvasHeight: vp.height,
+          viewBox: vp.viewBox as [number, number, number, number],
+        });
+      }
+      setThumbs(nuevas);
+      setRegions({});
+      setProgress(100);
+      setStage("region");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Error desconocido";
+      toast.error(`No se ha podido cargar el PDF: ${msg}`);
+      setStage("form");
+    }
+  }, [file]);
+
+
 
   const processPdf = useCallback(async () => {
     if (!file) return;
