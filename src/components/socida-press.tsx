@@ -753,6 +753,19 @@ export default function SocidaPressApp() {
   const pdfRef = useRef<unknown>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Biblioteca persistente en localStorage
+  const [saved, setSaved] = useState<SavedNoticia[]>([]);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [lastSavedId, setLastSavedId] = useState<string | null>(null);
+  useEffect(() => {
+    setSaved(cargarNoticias());
+  }, []);
+  const persist = useCallback((next: SavedNoticia[]) => {
+    setSaved(next);
+    guardarNoticias(next);
+  }, []);
+
+
   const handleReset = () => {
     setStage("form");
     setFile(null);
