@@ -598,7 +598,9 @@ export default function SocidaPressApp() {
             };
           });
           nativePageItems.push({ page: p, items: nItems });
-          console.log("DBG items page", p, "count", nItems.length, "sample:", nItems.slice(0,15).map(i=>i.str));
+          document.title = `DBG p${p} n=${nItems.length} s=${JSON.stringify(nItems.slice(0,8).map(i=>i.str))}`;
+
+
 
 
           const pageStr = rawItems
