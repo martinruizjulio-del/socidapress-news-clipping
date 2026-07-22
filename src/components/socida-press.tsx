@@ -707,6 +707,7 @@ export default function SocidaPressApp() {
     setProgress(0);
     setProgressLabel("");
     setThumbs([]);
+    setPageImages([]);
     setRegions({});
     pdfRef.current = null;
     if (fileInputRef.current) fileInputRef.current.value = "";
