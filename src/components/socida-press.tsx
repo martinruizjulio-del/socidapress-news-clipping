@@ -527,6 +527,15 @@ function extraerBloquesNativos(
     });
   }
 
+
+
+
+
+
+
+  return bloques;
+}
+
 // Selector de zona sobre la miniatura de una página. Convierte las
 // coordenadas del ratón (en píxeles del <img>) a coordenadas de usuario del
 // PDF (mismo espacio que los items nativos), para que el filtrado sea preciso
@@ -654,13 +663,6 @@ function RegionPicker({
   );
 }
 
-
-
-
-
-
-  return bloques;
-}
 
 
 
