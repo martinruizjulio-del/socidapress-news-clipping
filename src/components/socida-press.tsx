@@ -476,10 +476,8 @@ export function extraerBloquesNativos(
       return b.y - a.y;
     });
     const raw = lineasCuerpo.map((l) => l.text).join("\n");
-    (window as unknown as { __DBG__?: string[] }).__DBG__ ??= [];
-    (window as unknown as { __DBG__: string[] }).__DBG__.push(`RAW#${i}: ${raw.slice(0, 300)}`);
     const limpio = limpiarTexto(raw);
-    (window as unknown as { __DBG__: string[] }).__DBG__.push(`LIM#${i}: ${limpio.slice(0, 300)}`);
+
 
 
     if (limpio.length < 40 || esRuidoMaquetacion(limpio)) continue;
