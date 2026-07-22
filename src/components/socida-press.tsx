@@ -22,6 +22,7 @@ interface ExtractedImage {
 interface ExtractedTextBlock {
   id: string;
   page: number;
+  titulo?: string;
   text: string;
 }
 
@@ -177,38 +178,144 @@ function esRuidoMaquetacion(texto: string): boolean {
   return false;
 }
 
-// Limpia el texto crudo del OCR eliminando caracteres extraños,
+// Limpia texto (OCR o nativo) eliminando caracteres extraños,
 // símbolos sueltos, guiones de fin de línea y espacios repetidos.
 function limpiarTexto(texto: string): string {
   let s = texto;
   // Normaliza a NFC y elimina caracteres de control invisibles
   s = s.normalize("NFC");
   s = s.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, "");
-  // Elimina caracteres de reemplazo y símbolos raros de OCR
-  s = s.replace(/[\uFFFD\u00AD\u200B-\u200F\u202A-\u202E\u2060]/g, "");
-  // Sustituye comillas tipográficas y guiones largos por sus equivalentes ASCII
-  s = s.replace(/[“”«»]/g, '"').replace(/[‘’‚]/g, "'").replace(/[–—]/g, "-");
-  // Quita guiones al final de línea (palabras partidas por columnas)
-  s = s.replace(/-\n(\p{Ll})/gu, "$1");
-  // Une saltos de línea internos de un mismo párrafo
+  // Elimina reemplazos, guiones opcionales y marcas de dirección
+  s = s.replace(/[\uFFFD\u00AD\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g, "");
+  // Comillas tipográficas y guiones largos -> ASCII
+  s = s.replace(/[“”«»„]/g, '"').replace(/[‘’‚‛]/g, "'").replace(/[–—―]/g, "-");
+  // Puntos suspensivos tipográficos
+  s = s.replace(/…/g, "...");
+  // Guiones de palabras partidas por columnas / fin de línea
+  s = s.replace(/(\p{L})-\s*\n\s*(\p{Ll})/gu, "$1$2");
+  // Une saltos de línea internos de un mismo párrafo (no dobles)
   s = s.replace(/([^\n])\n(?!\n)/g, "$1 ");
-  // Solo mantenemos letras (con acentos), dígitos, signos de puntuación
-  // habituales y espacios. Todo lo demás es ruido de OCR.
-  s = s.replace(/[^\p{L}\p{N}\s.,;:!¡¿?()"'%€$£/\-\n]/gu, " ");
-  // Colapsa espacios y saltos repetidos
+  // Solo letras (con acentos), dígitos, puntuación habitual y espacios
+  s = s.replace(/[^\p{L}\p{N}\s.,;:!¡¿?()"'%€$£ºª&/\-\n]/gu, " ");
+  // Colapsa espacios
   s = s.replace(/[ \t]{2,}/g, " ");
+  s = s.replace(/\s+([.,;:!?])/g, "$1");
   s = s.replace(/\n{3,}/g, "\n\n");
-  // Quita líneas que quedaron con muy pocos caracteres alfabéticos
+  // Elimina líneas con muy pocas letras o dominadas por ruido no alfabético
   s = s
     .split("\n")
     .filter((l) => {
       const t = l.trim();
       if (!t) return true;
       const letras = t.replace(/[^\p{L}]/gu, "").length;
-      return letras >= 3;
+      if (letras < 4) return false;
+      // ratio letras/total razonable
+      if (letras / t.length < 0.55) return false;
+      return true;
     })
     .join("\n");
+  // Palabras de una sola letra sueltas (excepto a, o, y, e, u)
+  s = s.replace(/\b(?![aAoOyYeEuU]\b)[a-záéíóúñ]\b/g, "").replace(/[ \t]{2,}/g, " ");
   return s.trim();
+}
+
+// Item del PDF con posición y tamaño ya normalizados.
+type NativeItem = {
+  str: string;
+  x: number;
+  y: number;
+  size: number;
+  hasEOL: boolean;
+};
+
+// Convierte los items de pdf.js a bloques {titulo?, text} detectando cambios de
+// tamaño (subtítulos), párrafos por gaps verticales y columnas por gaps de X.
+function extraerBloquesNativos(items: NativeItem[]): { titulo?: string; text: string }[] {
+  if (!items.length) return [];
+
+  // Estimar tamaño mediana (cuerpo de texto)
+  const sizes = items.map((i) => i.size).filter((s) => s > 0).sort((a, b) => a - b);
+  const median = sizes[Math.floor(sizes.length / 2)] || 10;
+
+  // Agrupar items en líneas por columna (x aproximada) y por y
+  const sorted = [...items].sort((a, b) => {
+    // Ordena por columna aproximada (bloques de 100pt en X * escala 2 = 200)
+    const col = Math.floor(a.x / 200) - Math.floor(b.x / 200);
+    if (col !== 0) return col;
+    return b.y - a.y; // pdf.js: y crece hacia arriba
+  });
+
+  type Linea = { x: number; y: number; size: number; text: string };
+  const lineas: Linea[] = [];
+  let cur: Linea | null = null;
+  const yTol = median * 0.6;
+  for (const it of sorted) {
+    const str = it.str;
+    if (!str.trim() && !it.hasEOL) continue;
+    if (
+      cur &&
+      Math.abs(cur.y - it.y) <= yTol &&
+      Math.abs(cur.size - it.size) < 0.5 &&
+      Math.floor(cur.x / 200) === Math.floor(it.x / 200)
+    ) {
+      cur.text += (cur.text.endsWith(" ") || !str.startsWith(" ") ? "" : "") + str;
+    } else {
+      if (cur) lineas.push(cur);
+      cur = { x: it.x, y: it.y, size: it.size, text: str };
+    }
+    if (it.hasEOL) {
+      if (cur) lineas.push(cur);
+      cur = null;
+    }
+  }
+  if (cur) lineas.push(cur);
+
+  // Descartar líneas basura antes de agrupar
+  const limpias = lineas
+    .map((l) => ({ ...l, text: l.text.replace(/\s+/g, " ").trim() }))
+    .filter((l) => l.text.length > 0);
+
+  // Recorremos líneas y agrupamos en bloques.
+  // - Una línea con size > median * 1.3 y pocas palabras => subtítulo (inicia bloque)
+  // - Gap vertical grande (> median * 2) entre líneas => nuevo párrafo/bloque
+  const bloques: { titulo?: string; text: string }[] = [];
+  let bloqueActual: { titulo?: string; text: string } | null = null;
+  let ultimaY: number | null = null;
+  let ultimaCol: number | null = null;
+
+  const pushBloque = () => {
+    if (bloqueActual) {
+      const limpio = limpiarTexto(bloqueActual.text);
+      if (limpio.length > 40 && !esRuidoMaquetacion(limpio)) {
+        bloques.push({ titulo: bloqueActual.titulo, text: limpio });
+      }
+      bloqueActual = null;
+    }
+  };
+
+  for (const l of limpias) {
+    const col = Math.floor(l.x / 200);
+    const esSubtitulo =
+      l.size >= median * 1.3 && l.text.split(/\s+/).length <= 14 && l.text.length < 120;
+    const gap = ultimaY !== null ? Math.abs(ultimaY - l.y) : 0;
+    const nuevoBloque =
+      esSubtitulo ||
+      !bloqueActual ||
+      (ultimaCol !== null && ultimaCol !== col) ||
+      gap > median * 2.2;
+
+    if (nuevoBloque) {
+      pushBloque();
+      bloqueActual = { titulo: esSubtitulo ? l.text : undefined, text: esSubtitulo ? "" : l.text };
+    } else {
+      bloqueActual!.text += (bloqueActual!.text ? " " : "") + l.text;
+    }
+    ultimaY = l.y;
+    ultimaCol = col;
+  }
+  pushBloque();
+
+  return bloques;
 }
 
 
@@ -263,6 +370,7 @@ export default function SocidaPressApp() {
       const foundImages: ExtractedImage[] = [];
       const pageCanvases: { page: number; canvas: HTMLCanvasElement }[] = [];
       const nativePageTexts: { page: number; text: string }[] = [];
+      const nativePageItems: { page: number; items: NativeItem[] }[] = [];
       let tituloDetectado = "";
 
 
@@ -281,28 +389,36 @@ export default function SocidaPressApp() {
         await page.render({ canvasContext: ctx, viewport, canvas }).promise;
         pageCanvases.push({ page: p, canvas });
 
-        // Extraer texto nativo del PDF (mucho más fiable que OCR para
-        // detectar cabecera, fecha y título por tamaño de fuente).
+        // Extraer texto nativo del PDF (mucho más fiable que OCR).
         try {
           const tc = await page.getTextContent();
           type TItem = { str: string; height?: number; transform?: number[]; hasEOL?: boolean };
-          const items = (tc.items as unknown[]).filter(
+          const rawItems = (tc.items as unknown[]).filter(
             (it): it is TItem => !!it && typeof (it as TItem).str === "string",
           );
-          const pageStr = items
+          const nItems: NativeItem[] = rawItems.map((it) => {
+            const tr = it.transform || [0, 0, 0, 0, 0, 0];
+            return {
+              str: it.str,
+              x: tr[4] || 0,
+              y: tr[5] || 0,
+              size: it.height ?? Math.abs(tr[3] || 0),
+              hasEOL: !!it.hasEOL,
+            };
+          });
+          nativePageItems.push({ page: p, items: nItems });
+
+          const pageStr = rawItems
             .map((it) => it.str + (it.hasEOL ? "\n" : " "))
             .join("")
             .replace(/[ \t]+\n/g, "\n")
             .trim();
           nativePageTexts.push({ page: p, text: pageStr });
 
-          if (p === 1) {
-            // Título: buscamos los items con mayor altura de fuente
-            const withSize = items
-              .map((it) => ({
-                str: it.str.trim(),
-                size: it.height ?? (it.transform ? Math.abs(it.transform[3]) : 0),
-              }))
+          if (p === 1 && nItems.length) {
+            // Título: los items con mayor altura de fuente
+            const withSize = nItems
+              .map((it) => ({ str: it.str.trim(), size: it.size }))
               .filter((x) => x.str.length > 0);
             if (withSize.length) {
               const maxSize = withSize.reduce((m, x) => Math.max(m, x.size), 0);
@@ -394,32 +510,55 @@ export default function SocidaPressApp() {
         }
       }
 
-      // 2) OCR por página
-      setProgressLabel("Preparando OCR…");
-      setProgress(48);
-      const tesseract = await import("tesseract.js");
-      const worker = await tesseract.createWorker("spa", 1);
-
+      // 2) Construir bloques: preferimos texto nativo del PDF (limpio y con
+      //    subtítulos por tamaño de fuente). Solo pasamos por OCR las páginas
+      //    que no tengan capa de texto.
       const blocks: ExtractedTextBlock[] = [];
       const pagesText: { page: number; text: string }[] = [];
-      for (let idx = 0; idx < pageCanvases.length; idx++) {
-        const { page, canvas } = pageCanvases[idx];
-        setProgressLabel(`OCR página ${page} de ${numPages}…`);
-        setProgress(50 + Math.round(((idx + 1) / pageCanvases.length) * 48));
-        const { data } = await worker.recognize(canvas);
-        const raw = (data.text || "").trim();
-        pagesText.push({ page, text: raw });
-        if (!raw) continue;
-        const chunks = raw
-          .split(/\n\s*\n+/g)
-          .map((s) => limpiarTexto(s))
-          // Filtramos elementos de maquetación: firmas, cabeceras, pies…
-          .filter((s) => s.length > 0 && !esRuidoMaquetacion(s));
-        chunks.forEach((c, i) => {
-          blocks.push({ id: `txt-${page}-${i}`, page, text: c });
-        });
+      const paginasSinTexto: { page: number; canvas: HTMLCanvasElement }[] = [];
+
+      for (const { page, canvas } of pageCanvases) {
+        const nativa = nativePageItems.find((n) => n.page === page);
+        if (nativa && nativa.items.length > 20) {
+          const bloques = extraerBloquesNativos(nativa.items);
+          bloques.forEach((b, i) => {
+            blocks.push({
+              id: `txt-${page}-${i}`,
+              page,
+              titulo: b.titulo,
+              text: b.text,
+            });
+          });
+        } else {
+          paginasSinTexto.push({ page, canvas });
+        }
       }
-      await worker.terminate();
+
+      if (paginasSinTexto.length) {
+        setProgressLabel("Preparando OCR…");
+        setProgress(48);
+        const tesseract = await import("tesseract.js");
+        const worker = await tesseract.createWorker("spa", 1);
+        for (let idx = 0; idx < paginasSinTexto.length; idx++) {
+          const { page, canvas } = paginasSinTexto[idx];
+          setProgressLabel(`OCR página ${page} de ${numPages}…`);
+          setProgress(50 + Math.round(((idx + 1) / paginasSinTexto.length) * 48));
+          const { data } = await worker.recognize(canvas);
+          const raw = (data.text || "").trim();
+          pagesText.push({ page, text: raw });
+          if (!raw) continue;
+          const chunks = raw
+            .split(/\n\s*\n+/g)
+            .map((s) => limpiarTexto(s))
+            .filter((s) => s.length > 40 && !esRuidoMaquetacion(s));
+          chunks.forEach((c, i) => {
+            blocks.push({ id: `ocr-${page}-${i}`, page, text: c });
+          });
+        }
+        await worker.terminate();
+      } else {
+        setProgress(96);
+      }
 
       // 3) Extraer metadatos combinando texto nativo del PDF (más fiable)
       //    y, si no hubiera capa de texto, el resultado del OCR.
@@ -509,7 +648,7 @@ export default function SocidaPressApp() {
       titulo: metadata.titulo,
       fecha: metadata.fecha,
       hora: metadata.hora,
-      texto: finalTexts.map((t) => t.text).join("\n\n"),
+      bloques: finalTexts.map((t) => ({ titulo: t.titulo ?? "", texto: t.text })),
       imagenes: finalImages.map((i) => ({
         pagina: i.page,
         ancho: i.width,
@@ -743,10 +882,23 @@ export default function SocidaPressApp() {
                           onCheckedChange={() => toggleTxt(b.id)}
                           className="mt-1"
                         />
-                        <div className="flex-1 space-y-1">
+                        <div className="flex-1 space-y-2">
                           <p className="text-xs font-medium text-muted-foreground">
                             Página {b.page}
                           </p>
+                          <Input
+                            value={b.titulo ?? ""}
+                            placeholder="Subtítulo del bloque (opcional)"
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setTextBlocks((prev) =>
+                                prev.map((x) =>
+                                  x.id === b.id ? { ...x, titulo: v } : x,
+                                ),
+                              );
+                            }}
+                            className="font-semibold"
+                          />
                           <Textarea
                             value={b.text}
                             onChange={(e) => {
@@ -811,9 +963,12 @@ export default function SocidaPressApp() {
                   <h3 className="mb-3 text-sm font-semibold">Texto</h3>
                   <div className="space-y-3 rounded-md border bg-muted/30 p-4">
                     {finalTexts.map((t) => (
-                      <p key={t.id} className="whitespace-pre-wrap text-sm">
-                        {t.text}
-                      </p>
+                      <div key={t.id} className="space-y-1">
+                        {t.titulo && (
+                          <h4 className="text-sm font-semibold">{t.titulo}</h4>
+                        )}
+                        <p className="whitespace-pre-wrap text-sm">{t.text}</p>
+                      </div>
                     ))}
                   </div>
                 </div>
