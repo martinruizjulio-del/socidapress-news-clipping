@@ -215,11 +215,15 @@ function esEtiquetaSeccion(texto: string): boolean {
 // símbolos sueltos, guiones de fin de línea y espacios repetidos.
 function limpiarTexto(texto: string): string {
   let s = texto;
-  // Normaliza a NFC y elimina caracteres de control invisibles
-  s = s.normalize("NFC");
+  // Elimina caracteres de control invisibles
   s = s.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, "");
   // Elimina reemplazos, guiones opcionales y marcas de dirección
   s = s.replace(/[\uFFFD\u00AD\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g, "");
+  // Une marcas combinantes con la letra anterior aunque pdf.js las emita
+  // separadas por un espacio (ej. "n \u0303" -> "ñ" tras NFC).
+  s = s.replace(/(\p{L})\s+(\p{M})/gu, "$1$2");
+  // Ahora sí normaliza a NFC para componer letra + diacrítico -> ñ, á, é...
+  s = s.normalize("NFC");
   // Comillas tipográficas y guiones largos -> ASCII
   s = s.replace(/[“”«»„]/g, '"').replace(/[‘’‚‛]/g, "'").replace(/[–—―]/g, "-");
   // Puntos suspensivos tipográficos
@@ -228,8 +232,9 @@ function limpiarTexto(texto: string): string {
   s = s.replace(/(\p{L})-\s*\n\s*(\p{Ll})/gu, "$1$2");
   // Une saltos de línea internos de un mismo párrafo (no dobles)
   s = s.replace(/([^\n])\n(?!\n)/g, "$1 ");
-  // Solo letras (con acentos), dígitos, puntuación habitual y espacios
-  s = s.replace(/[^\p{L}\p{N}\s.,;:!¡¿?()"'%€$£ºª&/\-\n]/gu, " ");
+  // Whitelist ampliada: incluye marcas combinantes por si quedara alguna.
+  s = s.replace(/[^\p{L}\p{M}\p{N}\s.,;:!¡¿?()"'%€$£ºª&/\-\n]/gu, " ");
+
   // Colapsa espacios
   s = s.replace(/[ \t]{2,}/g, " ");
   s = s.replace(/\s+([.,;:!?])/g, "$1");
