@@ -177,6 +177,41 @@ function esRuidoMaquetacion(texto: string): boolean {
   return false;
 }
 
+// Limpia el texto crudo del OCR eliminando caracteres extraños,
+// símbolos sueltos, guiones de fin de línea y espacios repetidos.
+function limpiarTexto(texto: string): string {
+  let s = texto;
+  // Normaliza a NFC y elimina caracteres de control invisibles
+  s = s.normalize("NFC");
+  s = s.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, "");
+  // Elimina caracteres de reemplazo y símbolos raros de OCR
+  s = s.replace(/[\uFFFD\u00AD\u200B-\u200F\u202A-\u202E\u2060]/g, "");
+  // Sustituye comillas tipográficas y guiones largos por sus equivalentes ASCII
+  s = s.replace(/[“”«»]/g, '"').replace(/[‘’‚]/g, "'").replace(/[–—]/g, "-");
+  // Quita guiones al final de línea (palabras partidas por columnas)
+  s = s.replace(/-\n(\p{Ll})/gu, "$1");
+  // Une saltos de línea internos de un mismo párrafo
+  s = s.replace(/([^\n])\n(?!\n)/g, "$1 ");
+  // Solo mantenemos letras (con acentos), dígitos, signos de puntuación
+  // habituales y espacios. Todo lo demás es ruido de OCR.
+  s = s.replace(/[^\p{L}\p{N}\s.,;:!¡¿?()"'%€$£/\-\n]/gu, " ");
+  // Colapsa espacios y saltos repetidos
+  s = s.replace(/[ \t]{2,}/g, " ");
+  s = s.replace(/\n{3,}/g, "\n\n");
+  // Quita líneas que quedaron con muy pocos caracteres alfabéticos
+  s = s
+    .split("\n")
+    .filter((l) => {
+      const t = l.trim();
+      if (!t) return true;
+      const letras = t.replace(/[^\p{L}]/gu, "").length;
+      return letras >= 3;
+    })
+    .join("\n");
+  return s.trim();
+}
+
+
 
 export default function SocidaPressApp() {
   const [stage, setStage] = useState<Stage>("form");
