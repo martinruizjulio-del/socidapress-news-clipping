@@ -1147,18 +1147,31 @@ export default function SocidaPressApp() {
       titulo: metadata.titulo,
       fecha: metadata.fecha,
       hora: metadata.hora,
-      bloques: finalTexts.map((t) => ({
-        titulo: t.titulo ?? "",
-        fecha: t.fecha ?? "",
-        hora: t.hora ?? "",
-        texto: t.text,
-      })),
-
+      bloques: finalTexts.map((t) => {
+        const pi = pageImages.find((p) => p.page === t.page);
+        return {
+          pagina: t.page,
+          titulo: t.titulo ?? "",
+          fecha: t.fecha ?? "",
+          hora: t.hora ?? "",
+          texto: t.text,
+          // Imagen completa de la página de donde sale el bloque y, si el
+          // usuario marcó una zona en esa página, el recorte de la selección.
+          // Ambas van como data URL WebP para poder abrirlas por separado.
+          imagenPagina: pi?.fullDataUrl ?? null,
+          imagenSeleccion: pi?.cropDataUrl ?? null,
+        };
+      }),
       imagenes: finalImages.map((i) => ({
         pagina: i.page,
         ancho: i.width,
         alto: i.height,
         dataUrl: i.dataUrl,
+      })),
+      paginas: pageImages.map((p) => ({
+        pagina: p.page,
+        imagenPagina: p.fullDataUrl,
+        imagenSeleccion: p.cropDataUrl ?? null,
       })),
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
