@@ -105,6 +105,9 @@ interface PageThumb {
   canvasWidth: number;
   canvasHeight: number;
   viewBox: [number, number, number, number];
+  // Rotación intrínseca leída del PDF (0/90/180/270). La rotación final
+  // aplicada por el usuario se guarda aparte en `rotations`.
+  pdfRotation: number;
 }
 
 // Convierte un ImageData / canvas a dataURL webp
