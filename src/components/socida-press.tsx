@@ -1616,7 +1616,7 @@ export default function SocidaPressApp() {
       toast.error(`Error procesando el PDF: ${msg}`);
       setStage("form");
     }
-  }, [file, regions]);
+  }, [file, regions, rotations]);
 
   const toggleImg = (id: string) => {
     setSelectedImgIds((prev) => {
