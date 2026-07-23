@@ -604,18 +604,22 @@ function extraerBloquesNativos(
   return bloques;
 }
 
-// Selector de zona sobre la miniatura de una página. Convierte las
-// coordenadas del ratón (en píxeles del <img>) a coordenadas de usuario del
-// PDF (mismo espacio que los items nativos), para que el filtrado sea preciso
-// sea cual sea el tamaño al que se muestre la miniatura.
+// Selector de zona sobre la miniatura de una página. Permite dibujar varios
+// rectángulos y rotar la vista si el PDF está girado. Las coordenadas se
+// mapean de píxeles del <img> a coordenadas de usuario del PDF (mismo
+// espacio que los items nativos), teniendo en cuenta la rotación aplicada.
 function RegionPicker({
   thumb,
-  rect,
+  rects,
+  rotation,
   onChange,
+  onRotate,
 }: {
   thumb: PageThumb;
-  rect: PdfRect | undefined;
-  onChange: (rect: PdfRect | undefined) => void;
+  rects: PdfRect[];
+  rotation: number;
+  onChange: (rects: PdfRect[]) => void;
+  onRotate: (rot: number) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
@@ -623,18 +627,66 @@ function RegionPicker({
   const [vx0, vy0, vx1, vy1] = thumb.viewBox;
   const pdfW = vx1 - vx0;
   const pdfH = vy1 - vy0;
+  // Rotación efectiva aplicada visualmente sobre la miniatura (0/90/180/270).
+  const rot = ((rotation % 360) + 360) % 360;
 
-  const toPdf = (px: number, py: number, w: number, h: number): { x: number; y: number } => ({
-    x: vx0 + (px / w) * pdfW,
-    y: vy1 - (py / h) * pdfH,
-  });
+  // Convierte un punto (px,py) del contenedor rotado a coords PDF.
+  const toPdf = (px: number, py: number, w: number, h: number): { x: number; y: number } => {
+    // El contenedor tiene dimensiones (w,h) tras rotación. Deshacemos la
+    // rotación para volver al espacio del canvas original.
+    let ux = px;
+    let uy = py;
+    let W = w;
+    let H = h;
+    if (rot === 90) {
+      // El eje X del contenedor corresponde al eje Y inverso del canvas.
+      ux = py;
+      uy = w - px;
+      W = h;
+      H = w;
+    } else if (rot === 180) {
+      ux = w - px;
+      uy = h - py;
+    } else if (rot === 270) {
+      ux = h - py;
+      uy = px;
+      W = h;
+      H = w;
+    }
+    return {
+      x: vx0 + (ux / W) * pdfW,
+      y: vy1 - (uy / H) * pdfH,
+    };
+  };
 
-  const toPct = (r: PdfRect) => ({
-    left: `${((r.xMin - vx0) / pdfW) * 100}%`,
-    top: `${((vy1 - r.yMax) / pdfH) * 100}%`,
-    width: `${((r.xMax - r.xMin) / pdfW) * 100}%`,
-    height: `${((r.yMax - r.yMin) / pdfH) * 100}%`,
-  });
+  // Convierte un rect en coords PDF a estilo CSS % dentro del contenedor
+  // (que ya está rotado visualmente).
+  const toPct = (r: PdfRect) => {
+    // Puntos del rect en espacio canvas (sin rotar)
+    const ax = ((r.xMin - vx0) / pdfW) * 100;
+    const ay = ((vy1 - r.yMax) / pdfH) * 100;
+    const bx = ((r.xMax - vx0) / pdfW) * 100;
+    const by = ((vy1 - r.yMin) / pdfH) * 100;
+    // Aplicar rotación en %
+    let l: number, t: number, rgt: number, btm: number;
+    if (rot === 0) {
+      l = ax; t = ay; rgt = 100 - bx; btm = 100 - by;
+    } else if (rot === 90) {
+      // (x,y) -> (100-y, x) en un cuadrado; pero contenedor rota, así que:
+      // el contenedor rotado tiene ancho=alto original.
+      l = 100 - by; t = ax; rgt = 100 - (100 - ay); btm = 100 - bx;
+    } else if (rot === 180) {
+      l = 100 - bx; t = 100 - by; rgt = ax; btm = ay;
+    } else {
+      l = ay; t = 100 - bx; rgt = 100 - by; btm = 100 - (100 - ax);
+    }
+    return {
+      left: `${l}%`,
+      top: `${t}%`,
+      right: `${rgt}%`,
+      bottom: `${btm}%`,
+    };
+  };
 
   const onDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     const el = containerRef.current;
@@ -668,12 +720,13 @@ function RegionPicker({
     if (x1 - x0 < 10 || y1 - y0 < 10) return;
     const a = toPdf(x0, y0, b.width, b.height);
     const c = toPdf(x1, y1, b.width, b.height);
-    onChange({
+    const nuevo: PdfRect = {
       xMin: Math.min(a.x, c.x),
       xMax: Math.max(a.x, c.x),
       yMin: Math.min(a.y, c.y),
       yMax: Math.max(a.y, c.y),
-    });
+    };
+    onChange([...rects, nuevo]);
   };
 
   const overlay = drag
@@ -687,39 +740,77 @@ function RegionPicker({
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between">
-        <p className="text-sm font-medium">Página {thumb.page}</p>
-        {rect && (
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <p className="text-sm font-medium">
+          Página {thumb.page}
+          {rects.length > 0 && (
+            <span className="ml-2 text-xs font-normal text-muted-foreground">
+              {rects.length} zona{rects.length === 1 ? "" : "s"} marcada{rects.length === 1 ? "" : "s"}
+            </span>
+          )}
+        </p>
+        <div className="flex items-center gap-1">
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
-            onClick={() => onChange(undefined)}
+            onClick={() => onRotate((rot + 270) % 360)}
+            title="Girar 90° a la izquierda"
           >
-            Limpiar zona
+            <RotateCcw className="h-4 w-4" />
           </Button>
-        )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onRotate((rot + 90) % 360)}
+            title="Girar 90° a la derecha"
+          >
+            <RotateCcw className="h-4 w-4 scale-x-[-1]" />
+          </Button>
+          {rects.length > 0 && (
+            <Button variant="ghost" size="sm" onClick={() => onChange([])}>
+              Limpiar zonas
+            </Button>
+          )}
+        </div>
       </div>
       <div
         ref={containerRef}
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
-        className="relative inline-block max-w-full cursor-crosshair select-none rounded border bg-muted"
+        className="relative inline-block max-w-full cursor-crosshair select-none overflow-hidden rounded border bg-muted"
         style={{ touchAction: "none" }}
       >
         <img
           src={thumb.dataUrl}
           alt={`Página ${thumb.page}`}
-          className="block max-w-full h-auto pointer-events-none"
+          className="block max-w-full h-auto pointer-events-none origin-center"
           draggable={false}
           loading="lazy"
+          style={{ transform: `rotate(${rot}deg)` }}
         />
-        {rect && !drag && (
+        {rects.map((r, i) => (
           <div
+            key={i}
             className="pointer-events-none absolute border-2 border-primary bg-primary/15"
-            style={toPct(rect)}
-          />
-        )}
+            style={toPct(r)}
+          >
+            <span className="pointer-events-auto absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">
+              {i + 1}
+            </span>
+            <button
+              type="button"
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onChange(rects.filter((_, j) => j !== i));
+              }}
+              className="pointer-events-auto absolute -top-2 -left-2 flex h-5 w-5 items-center justify-center rounded-full bg-destructive text-[12px] leading-none text-destructive-foreground shadow"
+              title="Eliminar zona"
+            >
+              ×
+            </button>
+          </div>
+        ))}
         {overlay && (
           <div
             className="pointer-events-none absolute border-2 border-primary/70 bg-primary/10"
