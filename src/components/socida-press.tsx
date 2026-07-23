@@ -1161,11 +1161,22 @@ export default function SocidaPressApp() {
       const pdf = await pdfjs.getDocument({ data: buf }).promise;
       pdfRef.current = pdf;
       const nuevas: PageThumb[] = [];
+      const rotIniciales: Record<number, number> = {};
       for (let p = 1; p <= pdf.numPages; p++) {
         setProgressLabel(`Preparando página ${p} de ${pdf.numPages}…`);
         setProgress(10 + Math.round((p / pdf.numPages) * 80));
-        const page = await pdf.getPage(p);
-        const vp = page.getViewport({ scale: 1.3 });
+        const page = (await pdf.getPage(p)) as {
+          rotate?: number;
+          getViewport: (o: { scale: number; rotation?: number }) => {
+            width: number; height: number; viewBox: number[];
+          };
+          render: (o: { canvasContext: CanvasRenderingContext2D; viewport: unknown }) => { promise: Promise<void> };
+        };
+        const pdfRot = ((page.rotate ?? 0) % 360 + 360) % 360;
+        rotIniciales[p] = pdfRot;
+        // Renderizamos sin rotación adicional: la miniatura muestra el PDF
+        // "tal cual" y la corrección se aplica visualmente con CSS transform.
+        const vp = page.getViewport({ scale: 1.3, rotation: 0 });
         const canvas = document.createElement("canvas");
         canvas.width = vp.width;
         canvas.height = vp.height;
@@ -1178,10 +1189,12 @@ export default function SocidaPressApp() {
           canvasWidth: vp.width,
           canvasHeight: vp.height,
           viewBox: vp.viewBox as [number, number, number, number],
+          pdfRotation: pdfRot,
         });
       }
       setThumbs(nuevas);
       setRegions({});
+      setRotations(rotIniciales);
       setProgress(100);
       setStage("region");
     } catch (err) {
