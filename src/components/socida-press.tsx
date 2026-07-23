@@ -1437,20 +1437,59 @@ export default function SocidaPressApp() {
         }
       }
 
-      // Guardamos, por página, la imagen completa y (si hay zona marcada) el
-      // recorte, para poder acompañar cada bloque con su prueba visual.
-      const pageImgs: PageImage[] = pageCanvases.map(({ page, canvas, rectPx }) => {
+      // Recorte de una zona rectangular sobre un canvas ya rotado.
+      const recortar = (
+        canvas: HTMLCanvasElement,
+        r: { x: number; y: number; w: number; h: number },
+      ): HTMLCanvasElement | null => {
+        if (r.w < 20 || r.h < 20) return null;
+        const c = document.createElement("canvas");
+        c.width = Math.round(r.w);
+        c.height = Math.round(r.h);
+        const cctx = c.getContext("2d");
+        if (!cctx) return null;
+        cctx.drawImage(canvas, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+        return c;
+      };
+
+      // Preprocesado para OCR: upscale + escala de grises + refuerzo de
+      // contraste con umbral adaptativo simple. Mejora OCR con fondos
+      // ligeramente sucios o texto pixelado.
+      const preOcr = (canvas: HTMLCanvasElement, upscale = 2): HTMLCanvasElement => {
+        const c = document.createElement("canvas");
+        c.width = Math.round(canvas.width * upscale);
+        c.height = Math.round(canvas.height * upscale);
+        const cx = c.getContext("2d");
+        if (!cx) return canvas;
+        cx.imageSmoothingEnabled = true;
+        cx.imageSmoothingQuality = "high";
+        cx.drawImage(canvas, 0, 0, c.width, c.height);
+        const img = cx.getImageData(0, 0, c.width, c.height);
+        const d = img.data;
+        // media global para umbral
+        let sum = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        }
+        const mean = sum / (d.length / 4);
+        const th = mean * 0.92;
+        for (let i = 0; i < d.length; i += 4) {
+          const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+          const v = g < th ? 0 : 255;
+          d[i] = d[i + 1] = d[i + 2] = v;
+        }
+        cx.putImageData(img, 0, 0);
+        return c;
+      };
+
+      // Guardamos, por página, la imagen completa y (si hay zonas marcadas)
+      // el recorte de la primera zona como "prueba visual" resumen.
+      const pageImgs: PageImage[] = pageCanvases.map(({ page, canvas, rectsPx }) => {
         const fullDataUrl = canvas.toDataURL("image/webp", 0.85);
         let cropDataUrl: string | undefined;
-        if (rectPx && rectPx.w > 20 && rectPx.h > 20) {
-          const c = document.createElement("canvas");
-          c.width = Math.round(rectPx.w);
-          c.height = Math.round(rectPx.h);
-          const cctx = c.getContext("2d");
-          if (cctx) {
-            cctx.drawImage(canvas, rectPx.x, rectPx.y, rectPx.w, rectPx.h, 0, 0, c.width, c.height);
-            cropDataUrl = c.toDataURL("image/webp", 0.85);
-          }
+        if (rectsPx.length) {
+          const c = recortar(canvas, rectsPx[0]);
+          if (c) cropDataUrl = c.toDataURL("image/webp", 0.85);
         }
         return { page, fullDataUrl, cropDataUrl };
       });
@@ -1461,9 +1500,9 @@ export default function SocidaPressApp() {
       //    que no tengan capa de texto.
       const blocks: ExtractedTextBlock[] = [];
       const pagesText: { page: number; text: string }[] = [];
-      const paginasSinTexto: { page: number; canvas: HTMLCanvasElement; rectPx?: { x: number; y: number; w: number; h: number } }[] = [];
+      const paginasSinTexto: { page: number; canvas: HTMLCanvasElement; rectsPx: { x: number; y: number; w: number; h: number }[] }[] = [];
 
-      for (const { page, canvas, rectPx } of pageCanvases) {
+      for (const { page, canvas, rectsPx } of pageCanvases) {
         const nativa = nativePageItems.find((n) => n.page === page);
         if (nativa && nativa.items.length > 20) {
           const bloques = extraerBloquesNativos(nativa.items);
@@ -1477,9 +1516,8 @@ export default function SocidaPressApp() {
               text: b.text,
             });
           });
-
         } else {
-          paginasSinTexto.push({ page, canvas, rectPx });
+          paginasSinTexto.push({ page, canvas, rectsPx });
         }
       }
 
@@ -1488,28 +1526,45 @@ export default function SocidaPressApp() {
         setProgress(48);
         const tesseract = await import("tesseract.js");
         const worker = await tesseract.createWorker("spa", 1);
+        // Ajustes para máxima precisión: bloque uniforme, motor LSTM,
+        // conservar espacios, y un conjunto amplio de caracteres.
+        try {
+          await (worker as unknown as { setParameters: (p: Record<string, string>) => Promise<void> })
+            .setParameters({
+              tessedit_pageseg_mode: "6",
+              preserve_interword_spaces: "1",
+              user_defined_dpi: "300",
+            });
+        } catch {
+          // versiones antiguas de tesseract.js pueden no aceptar todos los params
+        }
+        // Total de "unidades" OCR = suma de rects por página (o página completa
+        // si no hay rects). Sirve para actualizar el progreso.
+        const totalUnidades =
+          paginasSinTexto.reduce((n, p) => n + (p.rectsPx.length || 1), 0) || 1;
+        let hechas = 0;
         for (let idx = 0; idx < paginasSinTexto.length; idx++) {
-          const { page, canvas, rectPx } = paginasSinTexto[idx];
-          setProgressLabel(`OCR página ${page} de ${numPages}…`);
-          setProgress(50 + Math.round(((idx + 1) / paginasSinTexto.length) * 48));
-          // Si hay zona marcada, recortamos el canvas para pasar sólo el
-          // rectángulo al OCR (más rápido y sin ruido de otras noticias).
-          let src: HTMLCanvasElement = canvas;
-          if (rectPx && rectPx.w > 20 && rectPx.h > 20) {
-            const c = document.createElement("canvas");
-            c.width = Math.round(rectPx.w);
-            c.height = Math.round(rectPx.h);
-            const cctx = c.getContext("2d");
-            if (cctx) {
-              cctx.drawImage(canvas, rectPx.x, rectPx.y, rectPx.w, rectPx.h, 0, 0, c.width, c.height);
-              src = c;
-            }
+          const { page, canvas, rectsPx } = paginasSinTexto[idx];
+          // Si hay zonas marcadas hacemos OCR sólo de cada zona;
+          // si no hay ninguna, OCR de la página completa.
+          const zonas: (HTMLCanvasElement | null)[] = rectsPx.length
+            ? rectsPx.map((r) => recortar(canvas, r))
+            : [canvas];
+          const textos: string[] = [];
+          for (const zona of zonas) {
+            if (!zona) { hechas++; continue; }
+            setProgressLabel(`OCR página ${page} · zona ${hechas + 1} de ${totalUnidades}…`);
+            const src = preOcr(zona, 2);
+            const { data } = await worker.recognize(src);
+            const raw = (data.text || "").trim();
+            if (raw) textos.push(raw);
+            hechas++;
+            setProgress(50 + Math.round((hechas / totalUnidades) * 48));
           }
-          const { data } = await worker.recognize(src);
-          const raw = (data.text || "").trim();
-          pagesText.push({ page, text: raw });
-          if (!raw) continue;
-          const chunks = raw
+          const rawFull = textos.join("\n\n");
+          pagesText.push({ page, text: rawFull });
+          if (!rawFull) continue;
+          const chunks = rawFull
             .split(/\n\s*\n+/g)
             .map((s) => limpiarTexto(s))
             .filter((s) => s.length > 40 && !esRuidoMaquetacion(s));
