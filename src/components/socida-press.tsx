@@ -1141,6 +1141,7 @@ export default function SocidaPressApp() {
     setThumbs([]);
     setPageImages([]);
     setRegions({});
+    setRotations({});
     pdfRef.current = null;
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
