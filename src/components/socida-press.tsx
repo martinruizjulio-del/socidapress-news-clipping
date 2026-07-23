@@ -1838,9 +1838,9 @@ export default function SocidaPressApp() {
             <CardHeader>
               <CardTitle>Marca la zona a escanear</CardTitle>
               <p className="text-sm text-muted-foreground">
-                Arrastra con el ratón sobre cada página para seleccionar la
-                zona que quieres importar. Si dejas una página sin marcar, se
-                escaneará completa.
+                Arrastra con el ratón sobre cada página para marcar una o
+                varias zonas. Se escaneará <b>sólo</b> lo que marques. Usa los
+                botones de girar si la página aparece torcida.
               </p>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -1848,14 +1848,18 @@ export default function SocidaPressApp() {
                 <RegionPicker
                   key={t.page}
                   thumb={t}
-                  rect={regions[t.page]}
-                  onChange={(rect) =>
+                  rects={regions[t.page] ?? []}
+                  rotation={rotations[t.page] ?? t.pdfRotation}
+                  onChange={(rects) =>
                     setRegions((prev) => {
                       const n = { ...prev };
-                      if (rect) n[t.page] = rect;
+                      if (rects.length) n[t.page] = rects;
                       else delete n[t.page];
                       return n;
                     })
+                  }
+                  onRotate={(rot) =>
+                    setRotations((prev) => ({ ...prev, [t.page]: rot }))
                   }
                 />
               ))}
