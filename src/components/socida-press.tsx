@@ -1231,19 +1231,26 @@ export default function SocidaPressApp() {
       const numPages = pdf.numPages;
 
       const foundImages: ExtractedImage[] = [];
-      const pageCanvases: { page: number; canvas: HTMLCanvasElement; rectPx?: { x: number; y: number; w: number; h: number } }[] = [];
+      const pageCanvases: { page: number; canvas: HTMLCanvasElement; rectsPx: { x: number; y: number; w: number; h: number }[]; rotation: number }[] = [];
       const nativePageTexts: { page: number; text: string }[] = [];
       const nativePageItems: { page: number; items: NativeItem[] }[] = [];
       let tituloDetectado = "";
 
+      // ¿Se han marcado zonas en alguna página? Si sí, solo procesamos las
+      // páginas con zonas marcadas (el usuario quiere aislar noticias
+      // concretas); en caso contrario, procesamos la página completa.
+      const haySeleccion = Object.values(regions).some((rs) => rs && rs.length > 0);
 
       // 1) Render + extracción de imágenes por página
       for (let p = 1; p <= numPages; p++) {
+        const rectsPdf = regions[p] || [];
+        if (haySeleccion && rectsPdf.length === 0) continue;
         setProgressLabel(`Analizando página ${p} de ${numPages}…`);
         setProgress(5 + Math.round(((p - 1) / numPages) * 40));
 
         const page = (await pdf.getPage(p)) as {
-          getViewport: (o: { scale: number }) => {
+          rotate?: number;
+          getViewport: (o: { scale: number; rotation?: number }) => {
             width: number;
             height: number;
             viewBox: number[];
@@ -1253,7 +1260,11 @@ export default function SocidaPressApp() {
           getOperatorList: () => Promise<{ fnArray: number[]; argsArray: unknown[][] }>;
           objs: { get: (n: string, cb: (o: unknown) => void) => void };
         };
-        const viewport = page.getViewport({ scale: 2 });
+        // Aplicamos la rotación elegida por el usuario (o la intrínseca del
+        // PDF si no ha tocado nada) para que el texto salga derecho.
+        const userRot = rotations[p];
+        const rotacion = ((userRot ?? (page.rotate ?? 0)) % 360 + 360) % 360;
+        const viewport = page.getViewport({ scale: 2, rotation: rotacion });
         const canvas = document.createElement("canvas");
         canvas.width = viewport.width;
         canvas.height = viewport.height;
@@ -1261,25 +1272,36 @@ export default function SocidaPressApp() {
         if (!ctx) continue;
         await page.render({ canvasContext: ctx, viewport }).promise;
 
-        // Si el usuario ha marcado una zona para esta página, calculamos el
-        // rectángulo equivalente en píxeles del canvas para poder recortar
-        // el OCR más adelante.
-        const rectPdf = regions[p];
-        let rectPx: { x: number; y: number; w: number; h: number } | undefined;
-        if (rectPdf) {
-          const [vx0, vy0, vx1, vy1] = viewport.viewBox as [number, number, number, number];
-          const pdfW = vx1 - vx0;
-          const pdfH = vy1 - vy0;
-          const sx = canvas.width / pdfW;
-          const sy = canvas.height / pdfH;
-          const x = (rectPdf.xMin - vx0) * sx;
-          const w = (rectPdf.xMax - rectPdf.xMin) * sx;
-          // Coordenada Y del PDF es ascendente; en canvas es descendente.
-          const y = (vy1 - rectPdf.yMax) * sy;
-          const h = (rectPdf.yMax - rectPdf.yMin) * sy;
-          rectPx = { x, y, w, h };
-        }
-        pageCanvases.push({ page: p, canvas, rectPx });
+        // Convertimos cada rect del usuario (coords PDF sin rotar) a
+        // píxeles del canvas ya rotado.
+        const [vx0, vy0, vx1, vy1] = viewport.viewBox as [number, number, number, number];
+        const pdfW = vx1 - vx0;
+        const pdfH = vy1 - vy0;
+        const cw = canvas.width;
+        const ch = canvas.height;
+        const rectsPx: { x: number; y: number; w: number; h: number }[] = rectsPdf.map((r) => {
+          // Cuatro esquinas en coords canvas para rotación=0 (Y baja hacia abajo)
+          const ax0 = ((r.xMin - vx0) / pdfW);
+          const ax1 = ((r.xMax - vx0) / pdfW);
+          const ay0 = ((vy1 - r.yMax) / pdfH);
+          const ay1 = ((vy1 - r.yMin) / pdfH);
+          let l: number, t: number, w: number, h: number;
+          if (rotacion === 0) {
+            l = ax0 * cw; t = ay0 * ch; w = (ax1 - ax0) * cw; h = (ay1 - ay0) * ch;
+          } else if (rotacion === 90) {
+            // (x,y) -> (H - y, x). Canvas rotado tiene w=oldH, h=oldW.
+            l = (1 - ay1) * cw; t = ax0 * ch;
+            w = (ay1 - ay0) * cw; h = (ax1 - ax0) * ch;
+          } else if (rotacion === 180) {
+            l = (1 - ax1) * cw; t = (1 - ay1) * ch;
+            w = (ax1 - ax0) * cw; h = (ay1 - ay0) * ch;
+          } else {
+            l = ay0 * cw; t = (1 - ax1) * ch;
+            w = (ay1 - ay0) * cw; h = (ax1 - ax0) * ch;
+          }
+          return { x: l, y: t, w, h };
+        });
+        pageCanvases.push({ page: p, canvas, rectsPx, rotation: rotacion });
 
 
         // Extraer texto nativo del PDF (mucho más fiable que OCR).
@@ -1299,24 +1321,20 @@ export default function SocidaPressApp() {
               hasEOL: !!it.hasEOL,
             };
           });
-          // Si hay zona marcada para esta página, nos quedamos sólo con los
-          // items cuyo origen cae dentro del rectángulo definido por el usuario.
-          const rectPdf = regions[p];
-          const nItemsFiltrados = rectPdf
-            ? nItems.filter(
-                (it) =>
-                  it.x >= rectPdf.xMin &&
-                  it.x <= rectPdf.xMax &&
-                  it.y >= rectPdf.yMin &&
-                  it.y <= rectPdf.yMax,
+          // Si el usuario marcó zonas, sólo aceptamos items cuya coordenada
+          // caiga dentro de ALGUNA de ellas.
+          const nItemsFiltrados = rectsPdf.length
+            ? nItems.filter((it) =>
+                rectsPdf.some(
+                  (r) =>
+                    it.x >= r.xMin &&
+                    it.x <= r.xMax &&
+                    it.y >= r.yMin &&
+                    it.y <= r.yMax,
+                ),
               )
             : nItems;
           nativePageItems.push({ page: p, items: nItemsFiltrados });
-
-
-
-
-
 
           const pageStr = rawItems
             .map((it) => it.str + (it.hasEOL ? "\n" : " "))
@@ -1326,7 +1344,6 @@ export default function SocidaPressApp() {
           nativePageTexts.push({ page: p, text: pageStr });
 
           if (p === 1 && nItems.length) {
-            // Título: los items con mayor altura de fuente
             const withSize = nItems
               .map((it) => ({ str: it.str.trim(), size: it.size }))
               .filter((x) => x.str.length > 0);
