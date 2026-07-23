@@ -1110,7 +1110,8 @@ export default function SocidaPressApp() {
   const [selectedTextIds, setSelectedTextIds] = useState<Set<string>>(new Set());
   const [thumbs, setThumbs] = useState<PageThumb[]>([]);
   const [pageImages, setPageImages] = useState<PageImage[]>([]);
-  const [regions, setRegions] = useState<Record<number, PdfRect>>({});
+  const [regions, setRegions] = useState<Record<number, PdfRect[]>>({});
+  const [rotations, setRotations] = useState<Record<number, number>>({});
   const pdfRef = useRef<unknown>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
