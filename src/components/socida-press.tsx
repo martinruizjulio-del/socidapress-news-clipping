@@ -105,6 +105,9 @@ interface PageThumb {
   canvasWidth: number;
   canvasHeight: number;
   viewBox: [number, number, number, number];
+  // Rotación intrínseca leída del PDF (0/90/180/270). La rotación final
+  // aplicada por el usuario se guarda aparte en `rotations`.
+  pdfRotation: number;
 }
 
 // Convierte un ImageData / canvas a dataURL webp
@@ -601,18 +604,22 @@ function extraerBloquesNativos(
   return bloques;
 }
 
-// Selector de zona sobre la miniatura de una página. Convierte las
-// coordenadas del ratón (en píxeles del <img>) a coordenadas de usuario del
-// PDF (mismo espacio que los items nativos), para que el filtrado sea preciso
-// sea cual sea el tamaño al que se muestre la miniatura.
+// Selector de zona sobre la miniatura de una página. Permite dibujar varios
+// rectángulos y rotar la vista si el PDF está girado. Las coordenadas se
+// mapean de píxeles del <img> a coordenadas de usuario del PDF (mismo
+// espacio que los items nativos), teniendo en cuenta la rotación aplicada.
 function RegionPicker({
   thumb,
-  rect,
+  rects,
+  rotation,
   onChange,
+  onRotate,
 }: {
   thumb: PageThumb;
-  rect: PdfRect | undefined;
-  onChange: (rect: PdfRect | undefined) => void;
+  rects: PdfRect[];
+  rotation: number;
+  onChange: (rects: PdfRect[]) => void;
+  onRotate: (rot: number) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
@@ -620,18 +627,66 @@ function RegionPicker({
   const [vx0, vy0, vx1, vy1] = thumb.viewBox;
   const pdfW = vx1 - vx0;
   const pdfH = vy1 - vy0;
+  // Rotación efectiva aplicada visualmente sobre la miniatura (0/90/180/270).
+  const rot = ((rotation % 360) + 360) % 360;
 
-  const toPdf = (px: number, py: number, w: number, h: number): { x: number; y: number } => ({
-    x: vx0 + (px / w) * pdfW,
-    y: vy1 - (py / h) * pdfH,
-  });
+  // Convierte un punto (px,py) del contenedor rotado a coords PDF.
+  const toPdf = (px: number, py: number, w: number, h: number): { x: number; y: number } => {
+    // El contenedor tiene dimensiones (w,h) tras rotación. Deshacemos la
+    // rotación para volver al espacio del canvas original.
+    let ux = px;
+    let uy = py;
+    let W = w;
+    let H = h;
+    if (rot === 90) {
+      // El eje X del contenedor corresponde al eje Y inverso del canvas.
+      ux = py;
+      uy = w - px;
+      W = h;
+      H = w;
+    } else if (rot === 180) {
+      ux = w - px;
+      uy = h - py;
+    } else if (rot === 270) {
+      ux = h - py;
+      uy = px;
+      W = h;
+      H = w;
+    }
+    return {
+      x: vx0 + (ux / W) * pdfW,
+      y: vy1 - (uy / H) * pdfH,
+    };
+  };
 
-  const toPct = (r: PdfRect) => ({
-    left: `${((r.xMin - vx0) / pdfW) * 100}%`,
-    top: `${((vy1 - r.yMax) / pdfH) * 100}%`,
-    width: `${((r.xMax - r.xMin) / pdfW) * 100}%`,
-    height: `${((r.yMax - r.yMin) / pdfH) * 100}%`,
-  });
+  // Convierte un rect en coords PDF a estilo CSS % dentro del contenedor
+  // (que ya está rotado visualmente).
+  const toPct = (r: PdfRect) => {
+    // Puntos del rect en espacio canvas (sin rotar)
+    const ax = ((r.xMin - vx0) / pdfW) * 100;
+    const ay = ((vy1 - r.yMax) / pdfH) * 100;
+    const bx = ((r.xMax - vx0) / pdfW) * 100;
+    const by = ((vy1 - r.yMin) / pdfH) * 100;
+    // Aplicar rotación en %
+    let l: number, t: number, rgt: number, btm: number;
+    if (rot === 0) {
+      l = ax; t = ay; rgt = 100 - bx; btm = 100 - by;
+    } else if (rot === 90) {
+      // (x,y) -> (100-y, x) en un cuadrado; pero contenedor rota, así que:
+      // el contenedor rotado tiene ancho=alto original.
+      l = 100 - by; t = ax; rgt = 100 - (100 - ay); btm = 100 - bx;
+    } else if (rot === 180) {
+      l = 100 - bx; t = 100 - by; rgt = ax; btm = ay;
+    } else {
+      l = ay; t = 100 - bx; rgt = 100 - by; btm = 100 - (100 - ax);
+    }
+    return {
+      left: `${l}%`,
+      top: `${t}%`,
+      right: `${rgt}%`,
+      bottom: `${btm}%`,
+    };
+  };
 
   const onDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     const el = containerRef.current;
@@ -665,12 +720,13 @@ function RegionPicker({
     if (x1 - x0 < 10 || y1 - y0 < 10) return;
     const a = toPdf(x0, y0, b.width, b.height);
     const c = toPdf(x1, y1, b.width, b.height);
-    onChange({
+    const nuevo: PdfRect = {
       xMin: Math.min(a.x, c.x),
       xMax: Math.max(a.x, c.x),
       yMin: Math.min(a.y, c.y),
       yMax: Math.max(a.y, c.y),
-    });
+    };
+    onChange([...rects, nuevo]);
   };
 
   const overlay = drag
@@ -684,39 +740,77 @@ function RegionPicker({
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between">
-        <p className="text-sm font-medium">Página {thumb.page}</p>
-        {rect && (
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <p className="text-sm font-medium">
+          Página {thumb.page}
+          {rects.length > 0 && (
+            <span className="ml-2 text-xs font-normal text-muted-foreground">
+              {rects.length} zona{rects.length === 1 ? "" : "s"} marcada{rects.length === 1 ? "" : "s"}
+            </span>
+          )}
+        </p>
+        <div className="flex items-center gap-1">
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
-            onClick={() => onChange(undefined)}
+            onClick={() => onRotate((rot + 270) % 360)}
+            title="Girar 90° a la izquierda"
           >
-            Limpiar zona
+            <RotateCcw className="h-4 w-4" />
           </Button>
-        )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onRotate((rot + 90) % 360)}
+            title="Girar 90° a la derecha"
+          >
+            <RotateCcw className="h-4 w-4 scale-x-[-1]" />
+          </Button>
+          {rects.length > 0 && (
+            <Button variant="ghost" size="sm" onClick={() => onChange([])}>
+              Limpiar zonas
+            </Button>
+          )}
+        </div>
       </div>
       <div
         ref={containerRef}
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
-        className="relative inline-block max-w-full cursor-crosshair select-none rounded border bg-muted"
+        className="relative inline-block max-w-full cursor-crosshair select-none overflow-hidden rounded border bg-muted"
         style={{ touchAction: "none" }}
       >
         <img
           src={thumb.dataUrl}
           alt={`Página ${thumb.page}`}
-          className="block max-w-full h-auto pointer-events-none"
+          className="block max-w-full h-auto pointer-events-none origin-center"
           draggable={false}
           loading="lazy"
+          style={{ transform: `rotate(${rot}deg)` }}
         />
-        {rect && !drag && (
+        {rects.map((r, i) => (
           <div
+            key={i}
             className="pointer-events-none absolute border-2 border-primary bg-primary/15"
-            style={toPct(rect)}
-          />
-        )}
+            style={toPct(r)}
+          >
+            <span className="pointer-events-auto absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">
+              {i + 1}
+            </span>
+            <button
+              type="button"
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onChange(rects.filter((_, j) => j !== i));
+              }}
+              className="pointer-events-auto absolute -top-2 -left-2 flex h-5 w-5 items-center justify-center rounded-full bg-destructive text-[12px] leading-none text-destructive-foreground shadow"
+              title="Eliminar zona"
+            >
+              ×
+            </button>
+          </div>
+        ))}
         {overlay && (
           <div
             className="pointer-events-none absolute border-2 border-primary/70 bg-primary/10"
@@ -1016,7 +1110,8 @@ export default function SocidaPressApp() {
   const [selectedTextIds, setSelectedTextIds] = useState<Set<string>>(new Set());
   const [thumbs, setThumbs] = useState<PageThumb[]>([]);
   const [pageImages, setPageImages] = useState<PageImage[]>([]);
-  const [regions, setRegions] = useState<Record<number, PdfRect>>({});
+  const [regions, setRegions] = useState<Record<number, PdfRect[]>>({});
+  const [rotations, setRotations] = useState<Record<number, number>>({});
   const pdfRef = useRef<unknown>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -1046,6 +1141,7 @@ export default function SocidaPressApp() {
     setThumbs([]);
     setPageImages([]);
     setRegions({});
+    setRotations({});
     pdfRef.current = null;
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
@@ -1065,11 +1161,22 @@ export default function SocidaPressApp() {
       const pdf = await pdfjs.getDocument({ data: buf }).promise;
       pdfRef.current = pdf;
       const nuevas: PageThumb[] = [];
+      const rotIniciales: Record<number, number> = {};
       for (let p = 1; p <= pdf.numPages; p++) {
         setProgressLabel(`Preparando página ${p} de ${pdf.numPages}…`);
         setProgress(10 + Math.round((p / pdf.numPages) * 80));
-        const page = await pdf.getPage(p);
-        const vp = page.getViewport({ scale: 1.3 });
+        const page = (await pdf.getPage(p)) as {
+          rotate?: number;
+          getViewport: (o: { scale: number; rotation?: number }) => {
+            width: number; height: number; viewBox: number[];
+          };
+          render: (o: { canvasContext: CanvasRenderingContext2D; viewport: unknown }) => { promise: Promise<void> };
+        };
+        const pdfRot = ((page.rotate ?? 0) % 360 + 360) % 360;
+        rotIniciales[p] = pdfRot;
+        // Renderizamos sin rotación adicional: la miniatura muestra el PDF
+        // "tal cual" y la corrección se aplica visualmente con CSS transform.
+        const vp = page.getViewport({ scale: 1.3, rotation: 0 });
         const canvas = document.createElement("canvas");
         canvas.width = vp.width;
         canvas.height = vp.height;
@@ -1082,10 +1189,12 @@ export default function SocidaPressApp() {
           canvasWidth: vp.width,
           canvasHeight: vp.height,
           viewBox: vp.viewBox as [number, number, number, number],
+          pdfRotation: pdfRot,
         });
       }
       setThumbs(nuevas);
       setRegions({});
+      setRotations(rotIniciales);
       setProgress(100);
       setStage("region");
     } catch (err) {
@@ -1122,19 +1231,26 @@ export default function SocidaPressApp() {
       const numPages = pdf.numPages;
 
       const foundImages: ExtractedImage[] = [];
-      const pageCanvases: { page: number; canvas: HTMLCanvasElement; rectPx?: { x: number; y: number; w: number; h: number } }[] = [];
+      const pageCanvases: { page: number; canvas: HTMLCanvasElement; rectsPx: { x: number; y: number; w: number; h: number }[]; rotation: number }[] = [];
       const nativePageTexts: { page: number; text: string }[] = [];
       const nativePageItems: { page: number; items: NativeItem[] }[] = [];
       let tituloDetectado = "";
 
+      // ¿Se han marcado zonas en alguna página? Si sí, solo procesamos las
+      // páginas con zonas marcadas (el usuario quiere aislar noticias
+      // concretas); en caso contrario, procesamos la página completa.
+      const haySeleccion = Object.values(regions).some((rs) => rs && rs.length > 0);
 
       // 1) Render + extracción de imágenes por página
       for (let p = 1; p <= numPages; p++) {
+        const rectsPdf = regions[p] || [];
+        if (haySeleccion && rectsPdf.length === 0) continue;
         setProgressLabel(`Analizando página ${p} de ${numPages}…`);
         setProgress(5 + Math.round(((p - 1) / numPages) * 40));
 
         const page = (await pdf.getPage(p)) as {
-          getViewport: (o: { scale: number }) => {
+          rotate?: number;
+          getViewport: (o: { scale: number; rotation?: number }) => {
             width: number;
             height: number;
             viewBox: number[];
@@ -1144,7 +1260,11 @@ export default function SocidaPressApp() {
           getOperatorList: () => Promise<{ fnArray: number[]; argsArray: unknown[][] }>;
           objs: { get: (n: string, cb: (o: unknown) => void) => void };
         };
-        const viewport = page.getViewport({ scale: 2 });
+        // Aplicamos la rotación elegida por el usuario (o la intrínseca del
+        // PDF si no ha tocado nada) para que el texto salga derecho.
+        const userRot = rotations[p];
+        const rotacion = ((userRot ?? (page.rotate ?? 0)) % 360 + 360) % 360;
+        const viewport = page.getViewport({ scale: 2, rotation: rotacion });
         const canvas = document.createElement("canvas");
         canvas.width = viewport.width;
         canvas.height = viewport.height;
@@ -1152,25 +1272,36 @@ export default function SocidaPressApp() {
         if (!ctx) continue;
         await page.render({ canvasContext: ctx, viewport }).promise;
 
-        // Si el usuario ha marcado una zona para esta página, calculamos el
-        // rectángulo equivalente en píxeles del canvas para poder recortar
-        // el OCR más adelante.
-        const rectPdf = regions[p];
-        let rectPx: { x: number; y: number; w: number; h: number } | undefined;
-        if (rectPdf) {
-          const [vx0, vy0, vx1, vy1] = viewport.viewBox as [number, number, number, number];
-          const pdfW = vx1 - vx0;
-          const pdfH = vy1 - vy0;
-          const sx = canvas.width / pdfW;
-          const sy = canvas.height / pdfH;
-          const x = (rectPdf.xMin - vx0) * sx;
-          const w = (rectPdf.xMax - rectPdf.xMin) * sx;
-          // Coordenada Y del PDF es ascendente; en canvas es descendente.
-          const y = (vy1 - rectPdf.yMax) * sy;
-          const h = (rectPdf.yMax - rectPdf.yMin) * sy;
-          rectPx = { x, y, w, h };
-        }
-        pageCanvases.push({ page: p, canvas, rectPx });
+        // Convertimos cada rect del usuario (coords PDF sin rotar) a
+        // píxeles del canvas ya rotado.
+        const [vx0, vy0, vx1, vy1] = viewport.viewBox as [number, number, number, number];
+        const pdfW = vx1 - vx0;
+        const pdfH = vy1 - vy0;
+        const cw = canvas.width;
+        const ch = canvas.height;
+        const rectsPx: { x: number; y: number; w: number; h: number }[] = rectsPdf.map((r) => {
+          // Cuatro esquinas en coords canvas para rotación=0 (Y baja hacia abajo)
+          const ax0 = ((r.xMin - vx0) / pdfW);
+          const ax1 = ((r.xMax - vx0) / pdfW);
+          const ay0 = ((vy1 - r.yMax) / pdfH);
+          const ay1 = ((vy1 - r.yMin) / pdfH);
+          let l: number, t: number, w: number, h: number;
+          if (rotacion === 0) {
+            l = ax0 * cw; t = ay0 * ch; w = (ax1 - ax0) * cw; h = (ay1 - ay0) * ch;
+          } else if (rotacion === 90) {
+            // (x,y) -> (H - y, x). Canvas rotado tiene w=oldH, h=oldW.
+            l = (1 - ay1) * cw; t = ax0 * ch;
+            w = (ay1 - ay0) * cw; h = (ax1 - ax0) * ch;
+          } else if (rotacion === 180) {
+            l = (1 - ax1) * cw; t = (1 - ay1) * ch;
+            w = (ax1 - ax0) * cw; h = (ay1 - ay0) * ch;
+          } else {
+            l = ay0 * cw; t = (1 - ax1) * ch;
+            w = (ay1 - ay0) * cw; h = (ax1 - ax0) * ch;
+          }
+          return { x: l, y: t, w, h };
+        });
+        pageCanvases.push({ page: p, canvas, rectsPx, rotation: rotacion });
 
 
         // Extraer texto nativo del PDF (mucho más fiable que OCR).
@@ -1190,24 +1321,20 @@ export default function SocidaPressApp() {
               hasEOL: !!it.hasEOL,
             };
           });
-          // Si hay zona marcada para esta página, nos quedamos sólo con los
-          // items cuyo origen cae dentro del rectángulo definido por el usuario.
-          const rectPdf = regions[p];
-          const nItemsFiltrados = rectPdf
-            ? nItems.filter(
-                (it) =>
-                  it.x >= rectPdf.xMin &&
-                  it.x <= rectPdf.xMax &&
-                  it.y >= rectPdf.yMin &&
-                  it.y <= rectPdf.yMax,
+          // Si el usuario marcó zonas, sólo aceptamos items cuya coordenada
+          // caiga dentro de ALGUNA de ellas.
+          const nItemsFiltrados = rectsPdf.length
+            ? nItems.filter((it) =>
+                rectsPdf.some(
+                  (r) =>
+                    it.x >= r.xMin &&
+                    it.x <= r.xMax &&
+                    it.y >= r.yMin &&
+                    it.y <= r.yMax,
+                ),
               )
             : nItems;
           nativePageItems.push({ page: p, items: nItemsFiltrados });
-
-
-
-
-
 
           const pageStr = rawItems
             .map((it) => it.str + (it.hasEOL ? "\n" : " "))
@@ -1217,7 +1344,6 @@ export default function SocidaPressApp() {
           nativePageTexts.push({ page: p, text: pageStr });
 
           if (p === 1 && nItems.length) {
-            // Título: los items con mayor altura de fuente
             const withSize = nItems
               .map((it) => ({ str: it.str.trim(), size: it.size }))
               .filter((x) => x.str.length > 0);
@@ -1311,20 +1437,59 @@ export default function SocidaPressApp() {
         }
       }
 
-      // Guardamos, por página, la imagen completa y (si hay zona marcada) el
-      // recorte, para poder acompañar cada bloque con su prueba visual.
-      const pageImgs: PageImage[] = pageCanvases.map(({ page, canvas, rectPx }) => {
+      // Recorte de una zona rectangular sobre un canvas ya rotado.
+      const recortar = (
+        canvas: HTMLCanvasElement,
+        r: { x: number; y: number; w: number; h: number },
+      ): HTMLCanvasElement | null => {
+        if (r.w < 20 || r.h < 20) return null;
+        const c = document.createElement("canvas");
+        c.width = Math.round(r.w);
+        c.height = Math.round(r.h);
+        const cctx = c.getContext("2d");
+        if (!cctx) return null;
+        cctx.drawImage(canvas, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+        return c;
+      };
+
+      // Preprocesado para OCR: upscale + escala de grises + refuerzo de
+      // contraste con umbral adaptativo simple. Mejora OCR con fondos
+      // ligeramente sucios o texto pixelado.
+      const preOcr = (canvas: HTMLCanvasElement, upscale = 2): HTMLCanvasElement => {
+        const c = document.createElement("canvas");
+        c.width = Math.round(canvas.width * upscale);
+        c.height = Math.round(canvas.height * upscale);
+        const cx = c.getContext("2d");
+        if (!cx) return canvas;
+        cx.imageSmoothingEnabled = true;
+        cx.imageSmoothingQuality = "high";
+        cx.drawImage(canvas, 0, 0, c.width, c.height);
+        const img = cx.getImageData(0, 0, c.width, c.height);
+        const d = img.data;
+        // media global para umbral
+        let sum = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        }
+        const mean = sum / (d.length / 4);
+        const th = mean * 0.92;
+        for (let i = 0; i < d.length; i += 4) {
+          const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+          const v = g < th ? 0 : 255;
+          d[i] = d[i + 1] = d[i + 2] = v;
+        }
+        cx.putImageData(img, 0, 0);
+        return c;
+      };
+
+      // Guardamos, por página, la imagen completa y (si hay zonas marcadas)
+      // el recorte de la primera zona como "prueba visual" resumen.
+      const pageImgs: PageImage[] = pageCanvases.map(({ page, canvas, rectsPx }) => {
         const fullDataUrl = canvas.toDataURL("image/webp", 0.85);
         let cropDataUrl: string | undefined;
-        if (rectPx && rectPx.w > 20 && rectPx.h > 20) {
-          const c = document.createElement("canvas");
-          c.width = Math.round(rectPx.w);
-          c.height = Math.round(rectPx.h);
-          const cctx = c.getContext("2d");
-          if (cctx) {
-            cctx.drawImage(canvas, rectPx.x, rectPx.y, rectPx.w, rectPx.h, 0, 0, c.width, c.height);
-            cropDataUrl = c.toDataURL("image/webp", 0.85);
-          }
+        if (rectsPx.length) {
+          const c = recortar(canvas, rectsPx[0]);
+          if (c) cropDataUrl = c.toDataURL("image/webp", 0.85);
         }
         return { page, fullDataUrl, cropDataUrl };
       });
@@ -1335,9 +1500,9 @@ export default function SocidaPressApp() {
       //    que no tengan capa de texto.
       const blocks: ExtractedTextBlock[] = [];
       const pagesText: { page: number; text: string }[] = [];
-      const paginasSinTexto: { page: number; canvas: HTMLCanvasElement; rectPx?: { x: number; y: number; w: number; h: number } }[] = [];
+      const paginasSinTexto: { page: number; canvas: HTMLCanvasElement; rectsPx: { x: number; y: number; w: number; h: number }[] }[] = [];
 
-      for (const { page, canvas, rectPx } of pageCanvases) {
+      for (const { page, canvas, rectsPx } of pageCanvases) {
         const nativa = nativePageItems.find((n) => n.page === page);
         if (nativa && nativa.items.length > 20) {
           const bloques = extraerBloquesNativos(nativa.items);
@@ -1351,9 +1516,8 @@ export default function SocidaPressApp() {
               text: b.text,
             });
           });
-
         } else {
-          paginasSinTexto.push({ page, canvas, rectPx });
+          paginasSinTexto.push({ page, canvas, rectsPx });
         }
       }
 
@@ -1362,28 +1526,45 @@ export default function SocidaPressApp() {
         setProgress(48);
         const tesseract = await import("tesseract.js");
         const worker = await tesseract.createWorker("spa", 1);
+        // Ajustes para máxima precisión: bloque uniforme, motor LSTM,
+        // conservar espacios, y un conjunto amplio de caracteres.
+        try {
+          await (worker as unknown as { setParameters: (p: Record<string, string>) => Promise<void> })
+            .setParameters({
+              tessedit_pageseg_mode: "6",
+              preserve_interword_spaces: "1",
+              user_defined_dpi: "300",
+            });
+        } catch {
+          // versiones antiguas de tesseract.js pueden no aceptar todos los params
+        }
+        // Total de "unidades" OCR = suma de rects por página (o página completa
+        // si no hay rects). Sirve para actualizar el progreso.
+        const totalUnidades =
+          paginasSinTexto.reduce((n, p) => n + (p.rectsPx.length || 1), 0) || 1;
+        let hechas = 0;
         for (let idx = 0; idx < paginasSinTexto.length; idx++) {
-          const { page, canvas, rectPx } = paginasSinTexto[idx];
-          setProgressLabel(`OCR página ${page} de ${numPages}…`);
-          setProgress(50 + Math.round(((idx + 1) / paginasSinTexto.length) * 48));
-          // Si hay zona marcada, recortamos el canvas para pasar sólo el
-          // rectángulo al OCR (más rápido y sin ruido de otras noticias).
-          let src: HTMLCanvasElement = canvas;
-          if (rectPx && rectPx.w > 20 && rectPx.h > 20) {
-            const c = document.createElement("canvas");
-            c.width = Math.round(rectPx.w);
-            c.height = Math.round(rectPx.h);
-            const cctx = c.getContext("2d");
-            if (cctx) {
-              cctx.drawImage(canvas, rectPx.x, rectPx.y, rectPx.w, rectPx.h, 0, 0, c.width, c.height);
-              src = c;
-            }
+          const { page, canvas, rectsPx } = paginasSinTexto[idx];
+          // Si hay zonas marcadas hacemos OCR sólo de cada zona;
+          // si no hay ninguna, OCR de la página completa.
+          const zonas: (HTMLCanvasElement | null)[] = rectsPx.length
+            ? rectsPx.map((r) => recortar(canvas, r))
+            : [canvas];
+          const textos: string[] = [];
+          for (const zona of zonas) {
+            if (!zona) { hechas++; continue; }
+            setProgressLabel(`OCR página ${page} · zona ${hechas + 1} de ${totalUnidades}…`);
+            const src = preOcr(zona, 2);
+            const { data } = await worker.recognize(src);
+            const raw = (data.text || "").trim();
+            if (raw) textos.push(raw);
+            hechas++;
+            setProgress(50 + Math.round((hechas / totalUnidades) * 48));
           }
-          const { data } = await worker.recognize(src);
-          const raw = (data.text || "").trim();
-          pagesText.push({ page, text: raw });
-          if (!raw) continue;
-          const chunks = raw
+          const rawFull = textos.join("\n\n");
+          pagesText.push({ page, text: rawFull });
+          if (!rawFull) continue;
+          const chunks = rawFull
             .split(/\n\s*\n+/g)
             .map((s) => limpiarTexto(s))
             .filter((s) => s.length > 40 && !esRuidoMaquetacion(s));
@@ -1435,7 +1616,7 @@ export default function SocidaPressApp() {
       toast.error(`Error procesando el PDF: ${msg}`);
       setStage("form");
     }
-  }, [file, regions]);
+  }, [file, regions, rotations]);
 
   const toggleImg = (id: string) => {
     setSelectedImgIds((prev) => {
@@ -1657,9 +1838,9 @@ export default function SocidaPressApp() {
             <CardHeader>
               <CardTitle>Marca la zona a escanear</CardTitle>
               <p className="text-sm text-muted-foreground">
-                Arrastra con el ratón sobre cada página para seleccionar la
-                zona que quieres importar. Si dejas una página sin marcar, se
-                escaneará completa.
+                Arrastra con el ratón sobre cada página para marcar una o
+                varias zonas. Se escaneará <b>sólo</b> lo que marques. Usa los
+                botones de girar si la página aparece torcida.
               </p>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -1667,14 +1848,18 @@ export default function SocidaPressApp() {
                 <RegionPicker
                   key={t.page}
                   thumb={t}
-                  rect={regions[t.page]}
-                  onChange={(rect) =>
+                  rects={regions[t.page] ?? []}
+                  rotation={rotations[t.page] ?? t.pdfRotation}
+                  onChange={(rects) =>
                     setRegions((prev) => {
                       const n = { ...prev };
-                      if (rect) n[t.page] = rect;
+                      if (rects.length) n[t.page] = rects;
                       else delete n[t.page];
                       return n;
                     })
+                  }
+                  onRotate={(rot) =>
+                    setRotations((prev) => ({ ...prev, [t.page]: rot }))
                   }
                 />
               ))}
