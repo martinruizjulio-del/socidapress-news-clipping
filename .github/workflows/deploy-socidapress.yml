@@ -1,0 +1,142 @@
+name: Deploy SocidaPress
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    name: Build and deploy SocidaPress
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Preparar Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Blindar configuración estática para Plesk
+        run: |
+          cat > vite.config.ts <<'EOF'
+          // Configuración blindada para desplegar en Plesk como SPA estática.
+          // No usamos SSR/Node en producción: Apache servirá index.html desde el subdominio.
+          import { defineConfig } from "@lovable.dev/vite-tanstack-config";
+
+          export default defineConfig({
+            tanstackStart: {
+              server: { entry: "server" },
+              spa: {
+                enabled: true,
+                prerender: {
+                  outputPath: "/index.html",
+                  crawlLinks: false,
+                  retryCount: 0,
+                },
+              },
+            },
+          });
+          EOF
+
+          node <<'NODE'
+          const fs = require("fs");
+
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+
+          pkg.dependencies = pkg.dependencies || {};
+          pkg.devDependencies = pkg.devDependencies || {};
+
+          pkg.dependencies["@tanstack/react-query"] = "5.83.0";
+          pkg.dependencies["@tanstack/react-router"] = "1.168.25";
+          pkg.dependencies["@tanstack/react-start"] = "1.167.50";
+          pkg.dependencies["@tanstack/router-plugin"] = "1.167.28";
+
+          delete pkg.dependencies["@Lovable.dev/vite-tanstack-config"];
+          delete pkg.dependencies["@lovable.dev/vite-tanstack-config"];
+          delete pkg.devDependencies["@Lovable.dev/vite-tanstack-config"];
+
+          pkg.devDependencies["@lovable.dev/vite-tanstack-config"] = "2.5.3";
+          pkg.devDependencies["nitro"] = "3.0.260603-beta";
+          pkg.devDependencies["vite"] = "8.0.16";
+
+          fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          NODE
+
+          echo "package.json corregido:"
+          cat package.json
+
+          echo "vite.config.ts corregido:"
+          cat vite.config.ts
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Compilar proyecto y preparar carpeta estática
+        run: |
+          set +e
+          npm run build
+          BUILD_EXIT=$?
+          set -e
+
+          echo "Código de salida del build: $BUILD_EXIT"
+
+          rm -rf deploy
+          mkdir -p deploy
+
+          if [ -f "dist/client/index.html" ]; then
+            echo "Encontrado dist/client/index.html"
+            cp -R dist/client/. deploy/
+
+          elif [ -f ".output/public/index.html" ]; then
+            echo "Encontrado .output/public/index.html"
+            cp -R .output/public/. deploy/
+
+          elif [ -f ".output/public/_shell.html" ]; then
+            echo "Encontrado .output/public/_shell.html; copiando como index.html"
+            cp -R .output/public/. deploy/
+            cp .output/public/_shell.html deploy/index.html
+
+          else
+            echo "No se ha encontrado una salida estática válida."
+            echo "Archivos encontrados:"
+            find . -maxdepth 5 -type f | sort
+            exit 1
+          fi
+
+          cat > deploy/.htaccess <<'EOF'
+          <IfModule mod_rewrite.c>
+            RewriteEngine On
+            RewriteBase /
+
+            RewriteRule ^index\.html$ - [L]
+
+            RewriteCond %{REQUEST_FILENAME} -f [OR]
+            RewriteCond %{REQUEST_FILENAME} -d
+            RewriteRule ^ - [L]
+
+            RewriteRule . /index.html [L]
+          </IfModule>
+          EOF
+
+          echo "Contenido preparado para desplegar:"
+          ls -la deploy
+
+      - name: Desplegar en servidor
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftps
+          local-dir: ./deploy/
+          server-dir: /socidapress.actividadfisica.app/
+          dangerous-clean-slate: true
