@@ -580,7 +580,18 @@ function extraerBloquesNativos(
     if (!lineasCuerpo.length) continue;
 
     const xs = [...lineasCuerpo.map((l) => l.x)].sort((a, b) => a - b);
-    const gapCol = median * 3; // hueco mínimo entre columnas
+    // El hueco real entre columnas (el "pasillo" o "corondel") suele ser
+    // bastante más estrecho que 3x el tamaño de letra -con ese múltiplo fijo
+    // muchas maquetaciones nunca llegaban a detectarse como multicolumna y
+    // el texto se leía por altura sin respetar columnas-. En vez de un
+    // múltiplo fijo del tamaño de letra, lo calculamos de forma adaptativa:
+    // un hueco solo cuenta como frontera de columna si es notablemente
+    // mayor que el resto (al menos un tercio del hueco más grande visto),
+    // con un mínimo absoluto para no reaccionar al ruido normal de
+    // arranque de línea (sangrías, viñetas, justificado).
+    const gaps = xs.slice(1).map((x, idx) => x - xs[idx]);
+    const maxGap = gaps.length ? Math.max(...gaps) : 0;
+    const gapCol = Math.max(median * 1.2, maxGap * 0.35, 6);
     const colStarts: number[] = [];
     for (const x of xs) {
       if (!colStarts.length || x - colStarts[colStarts.length - 1] > gapCol) {
@@ -589,8 +600,9 @@ function extraerBloquesNativos(
     }
     const colIndex = (x: number) => {
       let idx = 0;
+      const tol = gapCol / 2;
       for (let k = 0; k < colStarts.length; k++) {
-        if (x >= colStarts[k] - median) idx = k;
+        if (x >= colStarts[k] - tol) idx = k;
       }
       return idx;
     };
