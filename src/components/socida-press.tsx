@@ -2153,7 +2153,19 @@ export default function SocidaPressApp() {
                         <div className="flex-1 space-y-2">
                           <p className="text-xs font-medium text-muted-foreground">
                             Página {b.page}
+                            {b.zona ? ` · zona ${b.zona}` : ""}
                           </p>
+                          {b.cropDataUrl && (
+                            <a href={b.cropDataUrl} target="_blank" rel="noreferrer">
+                              <img
+                                src={b.cropDataUrl}
+                                alt={`Zona ${b.zona} de la página ${b.page}`}
+                                loading="lazy"
+                                className="max-h-56 w-full rounded-md border object-contain"
+                              />
+                            </a>
+                          )}
+
                           <Input
                             value={b.titulo ?? ""}
                             placeholder="Subtítulo del bloque (opcional)"
