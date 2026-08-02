@@ -579,39 +579,62 @@ function extraerBloquesNativos(
     const lineasCuerpo = cuerpos[i];
     if (!lineasCuerpo.length) continue;
 
-    const xs = [...lineasCuerpo.map((l) => l.x)].sort((a, b) => a - b);
-    // El hueco real entre columnas (el "pasillo" o "corondel") suele ser
-    // bastante más estrecho que 3x el tamaño de letra -con ese múltiplo fijo
-    // muchas maquetaciones nunca llegaban a detectarse como multicolumna y
-    // el texto se leía por altura sin respetar columnas-. En vez de un
-    // múltiplo fijo del tamaño de letra, lo calculamos de forma adaptativa:
-    // un hueco solo cuenta como frontera de columna si es notablemente
-    // mayor que el resto (al menos un tercio del hueco más grande visto),
-    // con un mínimo absoluto para no reaccionar al ruido normal de
-    // arranque de línea (sangrías, viñetas, justificado).
-    const gaps = xs.slice(1).map((x, idx) => x - xs[idx]);
-    const maxGap = gaps.length ? Math.max(...gaps) : 0;
-    const gapCol = Math.max(median * 1.2, maxGap * 0.35, 6);
-    const colStarts: number[] = [];
-    for (const x of xs) {
-      if (!colStarts.length || x - colStarts[colStarts.length - 1] > gapCol) {
-        colStarts.push(x);
-      }
+    // Detectamos las columnas reales por COBERTURA horizontal en vez de por
+    // un umbral de hueco entre puntos de arranque de línea (ese método
+    // fallaba cuando el pasillo real entre columnas era más estrecho que el
+    // umbral, o se confundía con sangrías de inicio de párrafo). Marcamos
+    // qué posiciones horizontales quedan cubiertas por el ancho completo
+    // (x a xEnd) de alguna línea del cuerpo: el pasillo real entre columnas
+    // es la única franja por la que ninguna línea llega a pasar nunca,
+    // mientras que una sangría de primera línea sigue ocupando casi todo el
+    // ancho de su columna y por tanto no deja un hueco de cobertura.
+    const xLeftAll = Math.min(...lineasCuerpo.map((l) => l.x));
+    const xRightAll = Math.max(...lineasCuerpo.map((l) => l.xEnd));
+    const anchoTotal = Math.max(1, Math.ceil(xRightAll - xLeftAll));
+    const cobertura = new Uint8Array(anchoTotal + 1);
+    for (const l of lineasCuerpo) {
+      const desde = Math.max(0, Math.round(l.x - xLeftAll));
+      const hasta = Math.min(anchoTotal, Math.round(l.xEnd - xLeftAll));
+      for (let b = desde; b <= hasta; b++) cobertura[b] = 1;
     }
-    const colIndex = (x: number) => {
-      let idx = 0;
-      const tol = gapCol / 2;
-      for (let k = 0; k < colStarts.length; k++) {
-        if (x >= colStarts[k] - tol) idx = k;
+    // Un hueco solo cuenta como pasillo real si es de al menos un ancho de
+    // letra (evita ruido de redondeo) y dejaría contenido razonable a cada
+    // lado (evita fragmentar por un hueco espurio de una sola línea corta).
+    const huecoMin = Math.max(4, median * 0.8);
+    const anchoColMin = median * 4;
+    const colRangos: { desde: number; hasta: number }[] = [];
+    let inicioCol = 0;
+    let b = 0;
+    while (b <= anchoTotal) {
+      if (cobertura[b]) {
+        b++;
+        continue;
       }
-      return idx;
+      let finHueco = b;
+      while (finHueco <= anchoTotal && !cobertura[finHueco]) finHueco++;
+      const huecoAncho = finHueco - b;
+      const colAncho = b - inicioCol;
+      if (huecoAncho >= huecoMin && colAncho >= anchoColMin) {
+        colRangos.push({ desde: inicioCol, hasta: b });
+        inicioCol = finHueco;
+      }
+      b = finHueco;
+    }
+    colRangos.push({ desde: inicioCol, hasta: anchoTotal });
+
+    const colIndex = (x: number) => {
+      const rel = x - xLeftAll;
+      for (let k = 0; k < colRangos.length; k++) {
+        if (rel <= colRangos[k].hasta) return k;
+      }
+      return colRangos.length - 1;
     };
 
-    lineasCuerpo.sort((a, b) => {
+    lineasCuerpo.sort((a, b2) => {
       const ca = colIndex(a.x);
-      const cb = colIndex(b.x);
+      const cb = colIndex(b2.x);
       if (ca !== cb) return ca - cb;
-      return b.y - a.y;
+      return b2.y - a.y;
     });
     const raw = lineasCuerpo.map((l) => l.text).join("\n");
     const limpio = limpiarTexto(raw);
@@ -1585,6 +1608,138 @@ export default function SocidaPressApp() {
         }
       };
 
+      // Aplanado de iluminación: las fotos hechas con el móvil casi nunca
+      // tienen luz uniforme (sombra de la mano o del propio móvil, flash
+      // lateral, foco más fuerte en el centro que en los bordes...).
+      // Estimamos la "luz de fondo" con un desenfoque muy amplio -mediante
+      // imagen integral, así el radio no penaliza el rendimiento- que borra
+      // el texto pero conserva el degradado de luz, y normalizamos cada
+      // píxel respecto a esa estimación. Así una sombra en una esquina no
+      // hace que esa zona se binarice mal mientras el resto sale bien.
+      const aplanarIluminacion = (
+        gris: Uint8ClampedArray,
+        w: number,
+        h: number,
+      ): Uint8ClampedArray => {
+        const integral = new Float64Array((w + 1) * (h + 1));
+        for (let y = 0; y < h; y++) {
+          let fila = 0;
+          for (let x = 0; x < w; x++) {
+            fila += gris[y * w + x];
+            integral[(y + 1) * (w + 1) + (x + 1)] = integral[y * (w + 1) + (x + 1)] + fila;
+          }
+        }
+        // Radio amplio: suficiente para difuminar letras y párrafos enteros
+        // y quedarnos solo con el degradado de luz de fondo del papel.
+        const radio = Math.max(15, Math.round(Math.min(w, h) / 6));
+        const salida = new Uint8ClampedArray(w * h);
+        for (let y = 0; y < h; y++) {
+          const y0 = Math.max(0, y - radio);
+          const y1 = Math.min(h - 1, y + radio);
+          for (let x = 0; x < w; x++) {
+            const x0 = Math.max(0, x - radio);
+            const x1 = Math.min(w - 1, x + radio);
+            const area = (y1 - y0 + 1) * (x1 - x0 + 1);
+            const suma =
+              integral[(y1 + 1) * (w + 1) + (x1 + 1)] -
+              integral[y0 * (w + 1) + (x1 + 1)] -
+              integral[(y1 + 1) * (w + 1) + x0] +
+              integral[y0 * (w + 1) + x0];
+            const fondo = suma / area;
+            // Normalizamos contra un gris de referencia cercano al blanco
+            // del papel para no oscurecer las zonas ya bien iluminadas.
+            salida[y * w + x] = (gris[y * w + x] / Math.max(1, fondo)) * 200;
+          }
+        }
+        return salida;
+      };
+
+      // Corrección de inclinación (deskew): a diferencia de un escáner
+      // plano, una foto hecha a mano casi nunca sale perfectamente recta.
+      // Probamos un rango pequeño de ángulos sobre una copia reducida (para
+      // que sea rápido) y nos quedamos con el que alinea mejor las líneas
+      // de texto -perfil de proyección: la variable con más contraste entre
+      // líneas de texto y espacios entre líneas es la que está más recta-.
+      const corregirInclinacion = (canvas: HTMLCanvasElement): HTMLCanvasElement => {
+        const wOrig = canvas.width;
+        const hOrig = canvas.height;
+        const anchoAnalisis = 500;
+        const factor = Math.min(1, anchoAnalisis / wOrig);
+        const aw = Math.max(1, Math.round(wOrig * factor));
+        const ah = Math.max(1, Math.round(hOrig * factor));
+        const mini = document.createElement("canvas");
+        mini.width = aw;
+        mini.height = ah;
+        const mctx = mini.getContext("2d");
+        if (!mctx) return canvas;
+        mctx.drawImage(canvas, 0, 0, aw, ah);
+        const img = mctx.getImageData(0, 0, aw, ah);
+        const d = img.data;
+        let suma = 0;
+        const gris = new Uint8ClampedArray(aw * ah);
+        for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+          const g = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
+          gris[j] = g;
+          suma += g;
+        }
+        const media = suma / gris.length;
+        const oscuros: { x: number; y: number }[] = [];
+        for (let y = 0; y < ah; y++) {
+          for (let x = 0; x < aw; x++) {
+            if (gris[y * aw + x] < media * 0.82) oscuros.push({ x, y });
+          }
+        }
+        // Zona casi vacía de texto: no merece la pena buscar un ángulo.
+        if (oscuros.length < 200) return canvas;
+
+        let mejorAngulo = 0;
+        let mejorVarianza = -1;
+        const cx = aw / 2;
+        const cy = ah / 2;
+        for (let angDeg = -6; angDeg <= 6; angDeg += 0.5) {
+          const rad = (angDeg * Math.PI) / 180;
+          const cos = Math.cos(rad);
+          const sin = Math.sin(rad);
+          const filas = new Float64Array(ah);
+          for (const p of oscuros) {
+            const rx = p.x - cx;
+            const ry = p.y - cy;
+            const ryRot = rx * sin + ry * cos;
+            const fila = Math.round(ryRot + cy);
+            if (fila >= 0 && fila < ah) filas[fila]++;
+          }
+          const m = filas.reduce((a, b) => a + b, 0) / ah;
+          let varianza = 0;
+          for (let i = 0; i < ah; i++) varianza += (filas[i] - m) * (filas[i] - m);
+          varianza /= ah;
+          if (varianza > mejorVarianza) {
+            mejorVarianza = varianza;
+            mejorAngulo = angDeg;
+          }
+        }
+
+        // Ángulo despreciable: no merece la pena rotar (evitamos introducir
+        // artefactos de interpolación en fotos que ya salieron rectas).
+        if (Math.abs(mejorAngulo) < 0.3) return canvas;
+
+        const rad = (mejorAngulo * Math.PI) / 180;
+        const cos = Math.abs(Math.cos(rad));
+        const sin = Math.abs(Math.sin(rad));
+        const nw = Math.round(wOrig * cos + hOrig * sin);
+        const nh = Math.round(wOrig * sin + hOrig * cos);
+        const out = document.createElement("canvas");
+        out.width = nw;
+        out.height = nh;
+        const octx = out.getContext("2d");
+        if (!octx) return canvas;
+        octx.fillStyle = "#ffffff";
+        octx.fillRect(0, 0, nw, nh);
+        octx.translate(nw / 2, nh / 2);
+        octx.rotate(rad);
+        octx.drawImage(canvas, -wOrig / 2, -hOrig / 2);
+        return out;
+      };
+
       // Mejora de la zona seleccionada: se redimensiona a un ancho objetivo
       // (para que las letras tengan tamaño suficiente) y se ajustan luz y
       // color -> gris + estirado de niveles por percentiles + gamma.
@@ -1602,14 +1757,18 @@ export default function SocidaPressApp() {
 
         const img = cx.getImageData(0, 0, c.width, c.height);
         const d = img.data;
+        const w2 = c.width;
+        const h2 = c.height;
+        const grisesCrudos = new Uint8ClampedArray(w2 * h2);
+        for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+          grisesCrudos[j] = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
+        }
+        // Corregimos primero el degradado de luz (ver aplanarIluminacion);
+        // el histograma y el contraste se calculan ya sobre esa versión.
+        const grises = aplanarIluminacion(grisesCrudos, w2, h2);
         // Histograma de luminancia para calcular percentiles 2% y 98%.
         const hist = new Uint32Array(256);
-        const grises = new Uint8ClampedArray(d.length / 4);
-        for (let i = 0, j = 0; i < d.length; i += 4, j++) {
-          const g = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
-          grises[j] = g;
-          hist[g]++;
-        }
+        for (let j = 0; j < grises.length; j++) hist[grises[j]]++;
         const total = grises.length;
         const corte = Math.max(1, Math.round(total * 0.02));
         let lo = 0;
@@ -1635,10 +1794,8 @@ export default function SocidaPressApp() {
           const n = Math.min(1, Math.max(0, (v - lo) / rango));
           lut[v] = Math.round(Math.pow(n, 0.9) * 255);
         }
-        const w2 = c.width;
-        const h2 = c.height;
         const salidaGris = new Uint8ClampedArray(w2 * h2);
-        for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+        for (let j = 0; j < grises.length; j++) {
           salidaGris[j] = lut[grises[j]];
         }
         // Enfoque suave (unsharp mask) para realzar los trazos finos de las
@@ -1799,7 +1956,10 @@ export default function SocidaPressApp() {
             // recurrimos al recorte + ampliación del render de página.
             const altaRes = rectPdf ? await renderZonaDesdeOriginal(page, rectPdf, rotation) : null;
             const bruto = altaRes ?? recortar(canvas, r);
-            const mejorado = bruto ? mejorarZona(bruto, altaRes ? bruto.width : 2000) : null;
+            const enderezado = bruto ? corregirInclinacion(bruto) : null;
+            const mejorado = enderezado
+              ? mejorarZona(enderezado, altaRes ? enderezado.width : 2000)
+              : null;
             zonas.push({
               page,
               zona: i + 1,
