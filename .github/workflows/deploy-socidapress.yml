@@ -113,6 +113,8 @@ jobs:
           fi
 
           cat > deploy/.htaccess <<'EOF'
+          AddType text/javascript .mjs
+          AddType application/javascript .js
           <IfModule mod_rewrite.c>
             RewriteEngine On
             RewriteBase /
