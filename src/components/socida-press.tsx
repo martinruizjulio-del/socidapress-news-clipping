@@ -1842,7 +1842,9 @@ export default function SocidaPressApp() {
           // usuario marcó una zona en esa página, el recorte de la selección.
           // Ambas van como data URL WebP para poder abrirlas por separado.
           imagenPagina: pi?.fullDataUrl ?? null,
-          imagenSeleccion: pi?.cropDataUrl ?? null,
+          zona: t.zona ?? 1,
+          imagenSeleccion: t.cropDataUrl ?? pi?.cropDataUrl ?? null,
+
         };
       }),
       imagenes: finalImages.map((i) => ({
