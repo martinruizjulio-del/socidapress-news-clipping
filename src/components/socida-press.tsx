@@ -23,11 +23,16 @@ interface ExtractedImage {
 interface ExtractedTextBlock {
   id: string;
   page: number;
+  // Índice de la zona marcada por el usuario dentro de la página (1..n).
+  zona?: number;
   titulo?: string;
   fecha?: string;
   hora?: string;
   text: string;
+  // Recorte mejorado (redimensionado + ajuste de luz/color) de la zona.
+  cropDataUrl?: string;
 }
+
 
 
 interface Metadata {
@@ -1452,130 +1457,243 @@ export default function SocidaPressApp() {
         return c;
       };
 
-      // Preprocesado para OCR: upscale + escala de grises + refuerzo de
-      // contraste con umbral adaptativo simple. Mejora OCR con fondos
-      // ligeramente sucios o texto pixelado.
-      const preOcr = (canvas: HTMLCanvasElement, upscale = 2): HTMLCanvasElement => {
+      // Mejora de la zona seleccionada: se redimensiona a un ancho objetivo
+      // (para que las letras tengan tamaño suficiente) y se ajustan luz y
+      // color -> gris + estirado de niveles por percentiles + gamma.
+      // Devuelve una imagen legible y agradable a la vista.
+      const mejorarZona = (
+        canvas: HTMLCanvasElement,
+        anchoObjetivo = 2000,
+      ): HTMLCanvasElement => {
+        const escala = Math.min(4, Math.max(1, anchoObjetivo / canvas.width));
         const c = document.createElement("canvas");
-        c.width = Math.round(canvas.width * upscale);
-        c.height = Math.round(canvas.height * upscale);
+        c.width = Math.round(canvas.width * escala);
+        c.height = Math.round(canvas.height * escala);
         const cx = c.getContext("2d");
         if (!cx) return canvas;
         cx.imageSmoothingEnabled = true;
         cx.imageSmoothingQuality = "high";
         cx.drawImage(canvas, 0, 0, c.width, c.height);
+
         const img = cx.getImageData(0, 0, c.width, c.height);
         const d = img.data;
-        // media global para umbral
-        let sum = 0;
-        for (let i = 0; i < d.length; i += 4) {
-          sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        // Histograma de luminancia para calcular percentiles 2% y 98%.
+        const hist = new Uint32Array(256);
+        const grises = new Uint8ClampedArray(d.length / 4);
+        for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+          const g = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
+          grises[j] = g;
+          hist[g]++;
         }
-        const mean = sum / (d.length / 4);
-        const th = mean * 0.92;
-        for (let i = 0; i < d.length; i += 4) {
-          const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-          const v = g < th ? 0 : 255;
+        const total = grises.length;
+        const corte = Math.max(1, Math.round(total * 0.02));
+        let lo = 0;
+        let acc = 0;
+        while (lo < 255 && acc + hist[lo] < corte) { acc += hist[lo]; lo++; }
+        let hi = 255;
+        acc = 0;
+        while (hi > 0 && acc + hist[hi] < corte) { acc += hist[hi]; hi--; }
+        if (hi - lo < 20) { lo = 0; hi = 255; }
+        const rango = hi - lo;
+        // Tabla de conversión: niveles + gamma 0,9 (aclara ligeramente el fondo).
+        const lut = new Uint8ClampedArray(256);
+        for (let v = 0; v < 256; v++) {
+          const n = Math.min(1, Math.max(0, (v - lo) / rango));
+          lut[v] = Math.round(Math.pow(n, 0.9) * 255);
+        }
+        for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+          const v = lut[grises[j]];
           d[i] = d[i + 1] = d[i + 2] = v;
+          d[i + 3] = 255;
         }
         cx.putImageData(img, 0, 0);
         return c;
       };
 
-      // Guardamos, por página, la imagen completa y (si hay zonas marcadas)
-      // el recorte de la primera zona como "prueba visual" resumen.
-      const pageImgs: PageImage[] = pageCanvases.map(({ page, canvas, rectsPx }) => {
-        const fullDataUrl = canvas.toDataURL("image/webp", 0.85);
-        let cropDataUrl: string | undefined;
-        if (rectsPx.length) {
-          const c = recortar(canvas, rectsPx[0]);
-          if (c) cropDataUrl = c.toDataURL("image/webp", 0.85);
+      // Binarización adaptativa (media local mediante imagen integral).
+      // Se aplica solo a la copia que va al OCR, no a la que se guarda.
+      const binarizarParaOcr = (canvas: HTMLCanvasElement): HTMLCanvasElement => {
+        const cx = canvas.getContext("2d");
+        if (!cx) return canvas;
+        const w = canvas.width;
+        const h = canvas.height;
+        const img = cx.getImageData(0, 0, w, h);
+        const d = img.data;
+        const integral = new Float64Array((w + 1) * (h + 1));
+        for (let y = 0; y < h; y++) {
+          let fila = 0;
+          for (let x = 0; x < w; x++) {
+            fila += d[(y * w + x) * 4];
+            integral[(y + 1) * (w + 1) + (x + 1)] =
+              integral[y * (w + 1) + (x + 1)] + fila;
+          }
         }
-        return { page, fullDataUrl, cropDataUrl };
-      });
-      setPageImages(pageImgs);
+        const radio = Math.max(8, Math.round(Math.min(w, h) / 40));
+        const out = document.createElement("canvas");
+        out.width = w;
+        out.height = h;
+        const ox = out.getContext("2d");
+        if (!ox) return canvas;
+        const salida = ox.createImageData(w, h);
+        const so = salida.data;
+        for (let y = 0; y < h; y++) {
+          const y0 = Math.max(0, y - radio);
+          const y1 = Math.min(h - 1, y + radio);
+          for (let x = 0; x < w; x++) {
+            const x0 = Math.max(0, x - radio);
+            const x1 = Math.min(w - 1, x + radio);
+            const area = (y1 - y0 + 1) * (x1 - x0 + 1);
+            const suma =
+              integral[(y1 + 1) * (w + 1) + (x1 + 1)] -
+              integral[y0 * (w + 1) + (x1 + 1)] -
+              integral[(y1 + 1) * (w + 1) + x0] +
+              integral[y0 * (w + 1) + x0];
+            const media = suma / area;
+            const i = (y * w + x) * 4;
+            const v = d[i] < media * 0.9 ? 0 : 255;
+            so[i] = so[i + 1] = so[i + 2] = v;
+            so[i + 3] = 255;
+          }
+        }
+        ox.putImageData(salida, 0, 0);
+        return out;
+      };
 
-      // 2) Construir bloques: preferimos texto nativo del PDF (limpio y con
-      //    subtítulos por tamaño de fuente). Solo pasamos por OCR las páginas
-      //    que no tengan capa de texto.
-      const blocks: ExtractedTextBlock[] = [];
-      const pagesText: { page: number; text: string }[] = [];
-      const paginasSinTexto: { page: number; canvas: HTMLCanvasElement; rectsPx: { x: number; y: number; w: number; h: number }[] }[] = [];
+      // Imagen completa de cada página procesada (prueba visual).
+      const pageImgs: PageImage[] = pageCanvases.map(({ page, canvas }) => ({
+        page,
+        fullDataUrl: canvas.toDataURL("image/webp", 0.85),
+      }));
 
+      // 2) Construimos la lista de ZONAS a procesar. Cada zona marcada por el
+      //    usuario es una unidad independiente (su propio título, fecha, hora
+      //    y bloque de texto). Si no hay zonas, la página completa es la zona.
+      type Zona = {
+        page: number;
+        zona: number;
+        rectPdf: PdfRect | null;
+        recorte: HTMLCanvasElement | null;
+        cropDataUrl?: string;
+      };
+      const zonas: Zona[] = [];
       for (const { page, canvas, rectsPx } of pageCanvases) {
-        const nativa = nativePageItems.find((n) => n.page === page);
-        if (nativa && nativa.items.length > 20) {
-          const bloques = extraerBloquesNativos(nativa.items);
-          bloques.forEach((b, i) => {
-            blocks.push({
-              id: `txt-${page}-${i}`,
+        const rectsPdf = regions[page] || [];
+        if (rectsPx.length) {
+          rectsPx.forEach((r, i) => {
+            const bruto = recortar(canvas, r);
+            const mejorado = bruto ? mejorarZona(bruto) : null;
+            zonas.push({
               page,
-              titulo: b.titulo,
-              fecha: b.fecha,
-              hora: b.hora,
-              text: b.text,
+              zona: i + 1,
+              rectPdf: rectsPdf[i] ?? null,
+              recorte: mejorado,
+              cropDataUrl: mejorado
+                ? mejorado.toDataURL("image/webp", 0.9)
+                : undefined,
             });
           });
         } else {
-          paginasSinTexto.push({ page, canvas, rectsPx });
+          zonas.push({ page, zona: 1, rectPdf: null, recorte: canvas });
         }
       }
+      // La primera zona de cada página queda también como recorte resumen.
+      for (const pi of pageImgs) {
+        const z = zonas.find((x) => x.page === pi.page && x.cropDataUrl);
+        if (z) pi.cropDataUrl = z.cropDataUrl;
+      }
+      setPageImages(pageImgs);
 
-      if (paginasSinTexto.length) {
+      // 3) Extracción por zona: texto nativo del PDF si existe dentro de la
+      //    zona; si no, OCR de alta precisión sobre el recorte mejorado.
+      const blocks: ExtractedTextBlock[] = [];
+      const pagesText: { page: number; text: string }[] = [];
+
+      const dentro = (it: NativeItem, r: PdfRect | null) =>
+        !r ||
+        (it.x >= r.xMin && it.x <= r.xMax && it.y >= r.yMin && it.y <= r.yMax);
+
+      // Preparamos el OCR solo si alguna zona lo necesita.
+      type OcrWorker = {
+        recognize: (i: unknown) => Promise<{ data: { text?: string } }>;
+        terminate: () => Promise<unknown>;
+        setParameters?: (p: Record<string, string>) => Promise<void>;
+      };
+      let worker: OcrWorker | null = null;
+      const obtenerWorker = async (): Promise<OcrWorker> => {
+        if (worker) return worker;
         setProgressLabel("Preparando OCR…");
-        setProgress(48);
         const tesseract = await import("tesseract.js");
-        const worker = await tesseract.createWorker("spa", 1);
-        // Ajustes para máxima precisión: bloque uniforme, motor LSTM,
-        // conservar espacios, y un conjunto amplio de caracteres.
+        const w = (await tesseract.createWorker("spa", 1)) as unknown as OcrWorker;
         try {
-          await (worker as unknown as { setParameters: (p: Record<string, string>) => Promise<void> })
-            .setParameters({
-              tessedit_pageseg_mode: "6",
-              preserve_interword_spaces: "1",
-              user_defined_dpi: "300",
-            });
+          await w.setParameters?.({
+            tessedit_pageseg_mode: "6",
+            preserve_interword_spaces: "1",
+            user_defined_dpi: "300",
+          });
         } catch {
-          // versiones antiguas de tesseract.js pueden no aceptar todos los params
+          // versiones antiguas pueden no aceptar todos los parámetros
         }
-        // Total de "unidades" OCR = suma de rects por página (o página completa
-        // si no hay rects). Sirve para actualizar el progreso.
-        const totalUnidades =
-          paginasSinTexto.reduce((n, p) => n + (p.rectsPx.length || 1), 0) || 1;
-        let hechas = 0;
-        for (let idx = 0; idx < paginasSinTexto.length; idx++) {
-          const { page, canvas, rectsPx } = paginasSinTexto[idx];
-          // Si hay zonas marcadas hacemos OCR sólo de cada zona;
-          // si no hay ninguna, OCR de la página completa.
-          const zonas: (HTMLCanvasElement | null)[] = rectsPx.length
-            ? rectsPx.map((r) => recortar(canvas, r))
-            : [canvas];
-          const textos: string[] = [];
-          for (const zona of zonas) {
-            if (!zona) { hechas++; continue; }
-            setProgressLabel(`OCR página ${page} · zona ${hechas + 1} de ${totalUnidades}…`);
-            const src = preOcr(zona, 2);
-            const { data } = await worker.recognize(src);
-            const raw = (data.text || "").trim();
-            if (raw) textos.push(raw);
-            hechas++;
-            setProgress(50 + Math.round((hechas / totalUnidades) * 48));
+        worker = w;
+        return w;
+      };
+
+      for (let zi = 0; zi < zonas.length; zi++) {
+        const z = zonas[zi];
+        setProgressLabel(
+          `Extrayendo página ${z.page} · zona ${z.zona} (${zi + 1}/${zonas.length})…`,
+        );
+        setProgress(50 + Math.round((zi / zonas.length) * 45));
+
+        const nativa = nativePageItems.find((n) => n.page === z.page);
+        const itemsZona = (nativa?.items ?? []).filter((it) => dentro(it, z.rectPdf));
+
+        let titulo = "";
+        let texto = "";
+        if (itemsZona.length > 20) {
+          const bloques = extraerBloquesNativos(itemsZona);
+          titulo = bloques.find((b) => b.titulo)?.titulo ?? "";
+          texto = bloques.map((b) => b.text).filter(Boolean).join("\n\n");
+        }
+
+        if (!texto && z.recorte) {
+          const w = await obtenerWorker();
+          const { data } = await w.recognize(binarizarParaOcr(z.recorte));
+          const bruto = (data.text || "").trim();
+          pagesText.push({ page: z.page, text: bruto });
+          const lineas = bruto
+            .split(/\n+/g)
+            .map((s) => limpiarTexto(s))
+            .filter((s) => s.length > 0 && !esLineaRuido(s));
+          if (!titulo && lineas.length) {
+            const cand = lineas.find((l) => l.length >= 8 && l.length <= 120);
+            if (cand) titulo = cand;
           }
-          const rawFull = textos.join("\n\n");
-          pagesText.push({ page, text: rawFull });
-          if (!rawFull) continue;
-          const chunks = rawFull
+          texto = bruto
             .split(/\n\s*\n+/g)
             .map((s) => limpiarTexto(s))
-            .filter((s) => s.length > 40 && !esRuidoMaquetacion(s));
-          chunks.forEach((c, i) => {
-            blocks.push({ id: `ocr-${page}-${i}`, page, text: c });
-          });
+            .filter((s) => s.length > 25 && !esRuidoMaquetacion(s))
+            .join("\n\n");
         }
-        await worker.terminate();
-      } else {
-        setProgress(96);
+
+        if (!texto && !titulo) continue;
+
+        // Fecha y hora propias de la zona; si no aparecen, "por determinar".
+        const metaZona = extraerMetadatos(`${titulo}\n${texto}`, titulo);
+        blocks.push({
+          id: `z-${z.page}-${z.zona}`,
+          page: z.page,
+          zona: z.zona,
+          titulo,
+          fecha: metaZona.fecha || "por determinar",
+          hora: metaZona.hora || "por determinar",
+          text: texto,
+          cropDataUrl: z.cropDataUrl,
+        });
       }
+
+      if (worker) await (worker as OcrWorker).terminate();
+      setProgress(96);
+
 
       // 3) Extraer metadatos combinando texto nativo del PDF (más fiable)
       //    y, si no hubiera capa de texto, el resultado del OCR.
@@ -1670,7 +1788,8 @@ export default function SocidaPressApp() {
         texto: t.text,
         imagenPagina: pi?.fullDataUrl ?? null,
 
-        imagenSeleccion: pi?.cropDataUrl ?? null,
+        imagenSeleccion: t.cropDataUrl ?? pi?.cropDataUrl ?? null,
+
       };
     }),
     imagenes: finalImages.map((i) => ({
@@ -1723,7 +1842,9 @@ export default function SocidaPressApp() {
           // usuario marcó una zona en esa página, el recorte de la selección.
           // Ambas van como data URL WebP para poder abrirlas por separado.
           imagenPagina: pi?.fullDataUrl ?? null,
-          imagenSeleccion: pi?.cropDataUrl ?? null,
+          zona: t.zona ?? 1,
+          imagenSeleccion: t.cropDataUrl ?? pi?.cropDataUrl ?? null,
+
         };
       }),
       imagenes: finalImages.map((i) => ({
@@ -2032,7 +2153,19 @@ export default function SocidaPressApp() {
                         <div className="flex-1 space-y-2">
                           <p className="text-xs font-medium text-muted-foreground">
                             Página {b.page}
+                            {b.zona ? ` · zona ${b.zona}` : ""}
                           </p>
+                          {b.cropDataUrl && (
+                            <a href={b.cropDataUrl} target="_blank" rel="noreferrer">
+                              <img
+                                src={b.cropDataUrl}
+                                alt={`Zona ${b.zona} de la página ${b.page}`}
+                                loading="lazy"
+                                className="max-h-56 w-full rounded-md border object-contain"
+                              />
+                            </a>
+                          )}
+
                           <Input
                             value={b.titulo ?? ""}
                             placeholder="Subtítulo del bloque (opcional)"
