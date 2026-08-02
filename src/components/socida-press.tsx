@@ -23,11 +23,16 @@ interface ExtractedImage {
 interface ExtractedTextBlock {
   id: string;
   page: number;
+  // Índice de la zona marcada por el usuario dentro de la página (1..n).
+  zona?: number;
   titulo?: string;
   fecha?: string;
   hora?: string;
   text: string;
+  // Recorte mejorado (redimensionado + ajuste de luz/color) de la zona.
+  cropDataUrl?: string;
 }
+
 
 
 interface Metadata {
