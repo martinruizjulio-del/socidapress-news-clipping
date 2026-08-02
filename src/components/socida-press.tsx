@@ -1788,7 +1788,8 @@ export default function SocidaPressApp() {
         texto: t.text,
         imagenPagina: pi?.fullDataUrl ?? null,
 
-        imagenSeleccion: pi?.cropDataUrl ?? null,
+        imagenSeleccion: t.cropDataUrl ?? pi?.cropDataUrl ?? null,
+
       };
     }),
     imagenes: finalImages.map((i) => ({
