@@ -1174,8 +1174,10 @@ export default function SocidaPressApp() {
     setProgressLabel("Cargando PDF…");
     try {
       const pdfjs = await import("pdfjs-dist");
-      const workerUrl = (await import("pdfjs-dist/build/pdf.worker.min.mjs?url")).default;
-      pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+      pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+        "pdfjs-dist/build/pdf.worker.min.mjs",
+        import.meta.url,
+      ).toString();
       const buf = await file.arrayBuffer();
       const pdf = await pdfjs.getDocument({ data: buf }).promise;
       pdfRef.current = pdf;
@@ -1235,8 +1237,10 @@ export default function SocidaPressApp() {
 
     try {
       const pdfjs = await import("pdfjs-dist");
-      const workerUrl = (await import("pdfjs-dist/build/pdf.worker.min.mjs?url")).default;
-      pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+      pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+        "pdfjs-dist/build/pdf.worker.min.mjs",
+        import.meta.url,
+      ).toString();
 
       setProgressLabel("Leyendo PDF…");
       // Reutilizamos el documento ya cargado en el paso de "zona" si existe.
@@ -1825,7 +1829,12 @@ export default function SocidaPressApp() {
         const w = (await tesseract.createWorker("spa", 1)) as unknown as OcrWorker;
         try {
           await w.setParameters?.({
-            tessedit_pageseg_mode: "6",
+            // "3" = segmentación totalmente automática: detecta columnas y
+            // bloques de texto y respeta su orden de lectura (columna
+            // izquierda completa y luego la derecha). Con "6" (bloque único)
+            // el motor leía línea a línea saltando entre columnas y mezclaba
+            // las frases de una noticia a varias columnas.
+            tessedit_pageseg_mode: "3",
             preserve_interword_spaces: "1",
             user_defined_dpi: "300",
           });
