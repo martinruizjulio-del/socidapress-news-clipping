@@ -194,7 +194,7 @@ const MESES: Record<string, string> = {
 
 // Periódicos permitidos (orden por prioridad de detección: primero los que no
 // generan falsos positivos; "AS" al final por ser una palabra muy corta).
-const PERIODICOS_CONOCIDOS = ["Superdeporte", "Marca", "Sport", "AS"] as const;
+const PERIODICOS_CONOCIDOS = ["Superdeporte", "Mundo Deportivo", "Marca", "Sport", "AS"] as const;
 
 // Detecta el periódico buscando su nombre en el texto completo de la página.
 // Prioriza coincidencias con "DIARIO <X>" y exige límites de palabra.
@@ -1291,6 +1291,7 @@ export default function SocidaPressApp() {
       type PdfDocLike = {
         numPages: number;
         getPage: (n: number) => Promise<unknown>;
+        getMetadata?: () => Promise<{ info?: unknown }>;
       };
       const pdf: PdfDocLike =
         (pdfRef.current as PdfDocLike | null) ??
@@ -1308,6 +1309,44 @@ export default function SocidaPressApp() {
       const nativePageTexts: { page: number; text: string }[] = [];
       const nativePageItems: { page: number; items: NativeItem[] }[] = [];
       let tituloDetectado = "";
+
+      // Comprobamos SOLAPE del rectángulo con todo el ancho del fragmento de
+      // texto, no solo si su punto de anclaje (la línea base) cae dentro.
+      // Un párrafo con sangría colgante (p. ej. "■ Primera línea..." más a
+      // la derecha que las líneas de continuación, que vuelven al margen
+      // real) puede quedar con su punto de anclaje justo fuera de un
+      // recuadro dibujado a mano ajustado a esa primera línea, perdiendo
+      // así todo el resto del párrafo aunque se vea claramente dentro de
+      // la zona recortada. El margen en Y cubre que el punto de anclaje es
+      // la línea base: el propio texto se extiende algo por encima y por
+      // debajo de ese punto (mayúsculas, tildes, rabillos de "g"/"j"/"p").
+      const dentro = (it: NativeItem, r: PdfRect | null) => {
+        if (!r) return true;
+        const itXEnd = it.x + (it.width || it.size * it.str.length * 0.5);
+        const margenY = Math.max(it.size * 0.5, 3);
+        const solapaX = itXEnd >= r.xMin && it.x <= r.xMax;
+        const solapaY = it.y <= r.yMax + margenY && it.y >= r.yMin - margenY;
+        return solapaX && solapaY;
+      };
+
+      // Muchas apps de "escanear con el móvil" (Adobe Scan, CamScanner,
+      // Genius Scan, Microsoft Lens...) generan un PDF con la foto de la
+      // página como una única imagen y le incrustan SU PROPIO texto de OCR
+      // por encima, indistinguible a primera vista de un texto nativo real.
+      // Ese OCR suele ser bastante peor que el nuestro (sin el enderezado,
+      // aplanado de luz, binarización Sauvola, doble pasada...), así que si
+      // lo detectamos preferimos ignorarlo por completo y forzar nuestro
+      // propio OCR, aunque el recuento de items nativos sea alto.
+      let esAppDeEscaneo = false;
+      try {
+        const meta = await pdf.getMetadata?.();
+        const info = (meta?.info ?? {}) as Record<string, unknown>;
+        const textoMeta = `${info.Producer ?? ""} ${info.Creator ?? ""}`.toLowerCase();
+        esAppDeEscaneo = /scan|camscanner|genius scan|microsoft lens|turboscan/.test(textoMeta);
+      } catch {
+        // sin metadatos: seguimos con la heurística estructural de abajo
+      }
+      const paginasEscaneadas = new Set<number>();
 
       // ¿Se han marcado zonas en alguna página? Si sí, solo procesamos las
       // páginas con zonas marcadas (el usuario quiere aislar noticias
@@ -1416,16 +1455,38 @@ export default function SocidaPressApp() {
               hasEOL: !!it.hasEOL,
             };
           });
-          // Si el usuario marcó zonas, sólo aceptamos items cuya coordenada
-          // caiga dentro de ALGUNA de ellas.
+          // Si el usuario marcó zonas, sólo aceptamos items que SOLAPEN con
+          // ALGUNA de ellas (misma lógica de dentro(), no solo su punto de
+          // anclaje: ver el comentario junto a la definición de dentro()).
           const nItemsFiltrados = rectsPdf.length
-            ? nItems.filter((it) =>
-                rectsPdf.some(
-                  (r) => it.x >= r.xMin && it.x <= r.xMax && it.y >= r.yMin && it.y <= r.yMax,
-                ),
-              )
+            ? nItems.filter((it) => rectsPdf.some((r) => dentro(it, r)))
             : nItems;
           nativePageItems.push({ page: p, items: nItemsFiltrados });
+
+          // Detectamos páginas "foto + OCR incrustado" (apps de escanear
+          // con el móvil): normalmente es UNA sola imagen a toda página en
+          // vez de varias fotos sueltas de un PDF nativo. Sin metadatos de
+          // la app, usamos una heurística estructural: poquísimas imágenes
+          // pero muchísimo texto (todo el OCR de la app volcado palabra a
+          // palabra), algo que un PDF digital de verdad no suele tener.
+          let nImg = 0;
+          try {
+            const ops = await page.getOperatorList();
+            const OPS = pdfjs.OPS;
+            for (let i = 0; i < ops.fnArray.length; i++) {
+              if (
+                ops.fnArray[i] === OPS.paintImageXObject ||
+                ops.fnArray[i] === OPS.paintImageXObjectRepeat
+              ) {
+                nImg++;
+              }
+            }
+          } catch {
+            // si no se puede leer la lista de operadores, asumimos 0 imágenes
+          }
+          if ((esAppDeEscaneo && nImg <= 2) || (nImg <= 1 && nItems.length > 200)) {
+            paginasEscaneadas.add(p);
+          }
 
           const pageStr = rawItems
             .map((it) => it.str + (it.hasEOL ? "\n" : " "))
@@ -1434,7 +1495,7 @@ export default function SocidaPressApp() {
             .trim();
           nativePageTexts.push({ page: p, text: pageStr });
 
-          if (p === 1 && nItems.length) {
+          if (p === 1 && nItems.length && !paginasEscaneadas.has(p)) {
             const withSize = nItems
               .map((it) => ({ str: it.str.trim(), size: it.size }))
               .filter((x) => x.str.length > 0);
@@ -2005,9 +2066,6 @@ export default function SocidaPressApp() {
       const blocks: ExtractedTextBlock[] = [];
       const pagesText: { page: number; text: string }[] = [];
 
-      const dentro = (it: NativeItem, r: PdfRect | null) =>
-        !r || (it.x >= r.xMin && it.x <= r.xMax && it.y >= r.yMin && it.y <= r.yMax);
-
       // Preparamos el OCR solo si alguna zona lo necesita.
       type OcrWorker = {
         recognize: (i: unknown) => Promise<{ data: { text?: string; confidence?: number } }>;
@@ -2038,6 +2096,90 @@ export default function SocidaPressApp() {
         return w;
       };
 
+      // Muchas cabeceras de periódico llevan texto claro sobre fondo de
+      // color (p. ej. "SPORT" en blanco sobre una barra roja); el OCR
+      // asume por defecto letra oscura sobre fondo claro y no la lee
+      // aunque se vea perfectamente. Probamos también la versión invertida
+      // y añadimos ambos resultados (los patrones de fecha/periódico que
+      // buscamos después no se ven afectados por el texto de más).
+      const invertir = (canvas: HTMLCanvasElement): HTMLCanvasElement => {
+        const out = document.createElement("canvas");
+        out.width = canvas.width;
+        out.height = canvas.height;
+        const octx = out.getContext("2d");
+        const cctx = canvas.getContext("2d");
+        if (!octx || !cctx) return canvas;
+        const img = cctx.getImageData(0, 0, canvas.width, canvas.height);
+        const d = img.data;
+        for (let i = 0; i < d.length; i += 4) {
+          d[i] = 255 - d[i];
+          d[i + 1] = 255 - d[i + 1];
+          d[i + 2] = 255 - d[i + 2];
+        }
+        octx.putImageData(img, 0, 0);
+        return out;
+      };
+
+      // Además de las zonas que marca el usuario, intentamos leer por OCR
+      // la franja superior de cada página (donde muchos periódicos ponen
+      // su cabecera con el nombre y la fecha), para poder detectar
+      // periódico y fecha aunque el recorte de la noticia no incluya esa
+      // cabecera. Solo hace falta en páginas sin texto nativo (escaneadas
+      // o capturas de pantalla), que es justo cuando más se necesita.
+      const headerTexts: string[] = [];
+      for (const { page, canvas } of pageCanvases) {
+        const nativa = nativePageItems.find((n) => n.page === page);
+        if ((nativa?.items.length ?? 0) > 20 && !paginasEscaneadas.has(page)) continue; // ya hay texto nativo fiable
+        setProgressLabel(`Buscando cabecera en la página ${page}…`);
+        const alto = Math.max(20, Math.round(canvas.height * 0.09));
+        const franja = document.createElement("canvas");
+        franja.width = canvas.width;
+        franja.height = alto;
+        const fctx = franja.getContext("2d");
+        if (!fctx) continue;
+        fctx.drawImage(canvas, 0, 0, canvas.width, alto, 0, 0, canvas.width, alto);
+        try {
+          const w = await obtenerWorker();
+          const mejorada = mejorarZona(franja, franja.width);
+          const { data: dataNormal } = await w.recognize(mejorada);
+          if (dataNormal.text) headerTexts.push(dataNormal.text);
+          const { data: dataInv } = await w.recognize(invertir(mejorada));
+          if (dataInv.text) headerTexts.push(dataInv.text);
+        } catch {
+          // si falla el OCR de la cabecera, seguimos sin ese dato
+        }
+
+        // Algunos periódicos (AS) ponen la fecha en una franja vertical
+        // pegada al margen izquierdo en vez de arriba del todo. Probamos
+        // también esa franja, girada en los dos sentidos posibles (no
+        // sabemos a priori hacia qué lado se lee).
+        const anchoMargen = Math.max(20, Math.round(canvas.width * 0.06));
+        const margen = document.createElement("canvas");
+        margen.width = anchoMargen;
+        margen.height = canvas.height;
+        const mctx = margen.getContext("2d");
+        if (!mctx) continue;
+        mctx.drawImage(canvas, 0, 0, anchoMargen, canvas.height, 0, 0, anchoMargen, canvas.height);
+        const mejoradaMargen = mejorarZona(margen, margen.width);
+        for (const giro of [90, -90]) {
+          try {
+            const rotado = document.createElement("canvas");
+            rotado.width = mejoradaMargen.height;
+            rotado.height = mejoradaMargen.width;
+            const rctx = rotado.getContext("2d");
+            if (!rctx) continue;
+            rctx.translate(rotado.width / 2, rotado.height / 2);
+            rctx.rotate((giro * Math.PI) / 180);
+            rctx.drawImage(mejoradaMargen, -mejoradaMargen.width / 2, -mejoradaMargen.height / 2);
+            const w = await obtenerWorker();
+            const { data } = await w.recognize(rotado);
+            if (data.text) headerTexts.push(data.text);
+          } catch {
+            // si falla el OCR del margen, seguimos sin ese dato
+          }
+        }
+      }
+
       for (let zi = 0; zi < zonas.length; zi++) {
         const z = zonas[zi];
         setProgressLabel(
@@ -2050,7 +2192,11 @@ export default function SocidaPressApp() {
 
         let titulo = "";
         let texto = "";
-        if (itemsZona.length > 20) {
+        // Si la página es "foto + OCR incrustado" (ver paginasEscaneadas),
+        // ignoramos ese texto aunque haya muchos items: es el OCR de la
+        // app de escaneo, normalmente peor que el nuestro, y preferimos
+        // pasar directamente por nuestro propio pipeline de OCR.
+        if (itemsZona.length > 20 && !paginasEscaneadas.has(z.page)) {
           const bloques = extraerBloquesNativos(itemsZona);
           titulo = bloques.find((b) => b.titulo)?.titulo ?? "";
           texto = bloques
@@ -2113,9 +2259,14 @@ export default function SocidaPressApp() {
       setProgress(96);
 
       // 3) Extraer metadatos combinando texto nativo del PDF (más fiable)
-      //    y, si no hubiera capa de texto, el resultado del OCR.
-      const nativeFull = nativePageTexts.map((p) => p.text).join("\n");
-      const ocrFull = pagesText.map((p) => p.text).join("\n");
+      //    y, si no hubiera capa de texto, el resultado del OCR. El texto
+      //    de páginas "foto + OCR incrustado" (paginasEscaneadas) se excluye
+      //    aquí también: es el OCR de la app de escaneo, no texto nativo.
+      const nativeFull = nativePageTexts
+        .filter((p) => !paginasEscaneadas.has(p.page))
+        .map((p) => p.text)
+        .join("\n");
+      const ocrFull = pagesText.map((p) => p.text).join("\n") + "\n" + headerTexts.join("\n");
       const meta = extraerMetadatos(`${nativeFull}\n${ocrFull}`, tituloDetectado);
       // Si no se detecta fecha, la dejamos "por determinar".
       // Si no se detecta hora pero sí fecha, usamos la hora actual;
