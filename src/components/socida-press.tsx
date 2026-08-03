@@ -368,6 +368,7 @@ type NativeItem = {
   x: number;
   y: number;
   size: number;
+  width: number;
   hasEOL: boolean;
 };
 
@@ -400,13 +401,21 @@ function extraerBloquesNativos(
     const str = it.str;
     if (!str) continue;
     const last = lineas[lineas.length - 1];
-    const anchoAprox = it.size * str.length * 0.5;
+    // Ancho real del fragmento (pdf.js ya lo calcula con precisión). El
+    // margen para considerar que el siguiente fragmento sigue en la misma
+    // línea (en vez de ser ya la columna de al lado) tiene que ser
+    // pequeño: un espacio real mide como mucho ~1 tamaño de letra, muy
+    // lejos de los huecos de varias decenas de puntos que separan dos
+    // columnas de un periódico. Antes se usaba un margen fijo de 50pt que
+    // terminaba fusionando columnas distintas en una sola "línea".
+    const anchoAprox = it.width || it.size * str.length * 0.5;
+    const margenMismaLinea = Math.max(it.size * 0.6, 3);
     if (
       last &&
       Math.abs(last.y - it.y) <= yTol &&
       Math.abs(last.size - it.size) < 1 &&
       it.x >= last.xEnd - 5 &&
-      it.x <= last.xEnd + 50
+      it.x <= last.xEnd + margenMismaLinea
     ) {
       last.text += (last.text.endsWith(" ") || str.startsWith(" ") ? "" : " ") + str;
       last.xEnd = it.x + anchoAprox;
@@ -1381,7 +1390,13 @@ export default function SocidaPressApp() {
         // Extraer texto nativo del PDF (mucho más fiable que OCR).
         try {
           const tc = await page.getTextContent();
-          type TItem = { str: string; height?: number; transform?: number[]; hasEOL?: boolean };
+          type TItem = {
+            str: string;
+            width?: number;
+            height?: number;
+            transform?: number[];
+            hasEOL?: boolean;
+          };
           const rawItems = (tc.items as unknown[]).filter(
             (it): it is TItem => !!it && typeof (it as TItem).str === "string",
           );
@@ -1392,6 +1407,12 @@ export default function SocidaPressApp() {
               x: tr[4] || 0,
               y: tr[5] || 0,
               size: it.height ?? Math.abs(tr[3] || 0),
+              // Ancho real del fragmento (ya lo calcula pdf.js con la
+              // información exacta de las fuentes); antes se estimaba a
+              // ojo (tamaño × nº de caracteres × 0.5), lo que podía fallar
+              // por varios puntos y confundir un hueco entre columnas con
+              // un espacio dentro de la misma línea.
+              width: it.width ?? 0,
               hasEOL: !!it.hasEOL,
             };
           });
